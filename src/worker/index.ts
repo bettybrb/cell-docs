@@ -24,7 +24,8 @@ type Route =
   | { type: "health" }
   | { type: "workspace"; workspaceId: string }
   | { type: "docs"; workspaceId: string }
-  | { type: "doc"; workspaceId: string; docId: string };
+  | { type: "doc"; workspaceId: string; docId: string }
+  | { type: "doc-sync"; workspaceId: string; docId: string };
 
 export function matchRoute(pathname: string): Route | null {
   if (pathname === "/api/health") return { type: "health" };
@@ -32,7 +33,7 @@ export function matchRoute(pathname: string): Route | null {
   const parts = pathname.split("/").filter(Boolean); // ["api", "workspaces", ...]
   if (parts[0] !== "api" || parts[1] !== "workspaces") return null;
 
-  const [, , workspaceId, docsSegment, docId] = parts;
+  const [, , workspaceId, docsSegment, docId, syncSegment] = parts;
   if (parts.length === 3 && isValidId(workspaceId)) {
     return { type: "workspace", workspaceId };
   }
@@ -41,6 +42,9 @@ export function matchRoute(pathname: string): Route | null {
   }
   if (parts.length === 5 && docsSegment === "docs" && isValidId(workspaceId) && isValidId(docId)) {
     return { type: "doc", workspaceId, docId };
+  }
+  if (parts.length === 6 && docsSegment === "docs" && syncSegment === "sync" && isValidId(workspaceId) && isValidId(docId)) {
+    return { type: "doc-sync", workspaceId, docId };
   }
   return null;
 }
@@ -65,6 +69,13 @@ export default {
         return forwardToCell(env.WORKSPACE_CELL, workspaceCellName(route.workspaceId), request, "/docs");
       case "doc":
         return routeDoc(env, route.workspaceId, route.docId, request);
+      case "doc-sync":
+        // WebSocket upgrade: only the Upgrade header is passed on, no body.
+        return callCell(env.DOC_CELL, docCellName(route.workspaceId, route.docId), "/sync", {
+          method: "GET",
+          headers: { upgrade: request.headers.get("upgrade") ?? "" },
+          body: null,
+        });
     }
   },
 } satisfies ExportedHandler<Env>;

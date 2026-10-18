@@ -1,11 +1,15 @@
 import { DurableObject } from "cloudflare:workers";
+import * as Y from "yjs";
 import type { DocState, UpdateDocRequest } from "../../shared/api-types";
 import { parseCellName } from "../addressing";
 import { CELL_NAME_HEADER, errorResponse, json, readJsonObject } from "../http";
 import { cellInfo, claimCellName, createCellMetaTable, storedCellName } from "./cell-meta";
+import { handleMessage, replaceText, syncStep1Message, updateMessage } from "./yjs-sync";
 
 const MAX_TITLE_LENGTH = 200;
 const MAX_BODY_LENGTH = 100_000;
+/** Above this many stored updates, loading merges them into one row. */
+const COMPACT_AFTER_UPDATES = 100;
 
 interface DocRow {
   title: string;
@@ -20,10 +24,17 @@ interface DocRow {
 /**
  * One DocCell per document. Its private SQLite database holds exactly one
  * document row (enforced by `CHECK (id = 1)`), because the cell *is* the
- * document. Later phases will add Yjs updates and WebSocket sessions here.
+ * document.
+ *
+ * The body's source of truth is a Yjs document stored as a log of updates
+ * (`yjs_updates`). `doc.body` is a plain-text copy, rewritten on every
+ * update, so REST reads stay simple. Browsers connect over WebSockets
+ * (`/sync`) and exchange Yjs updates through this cell.
  */
 export class DocCell extends DurableObject<Env> {
   private readonly sql: SqlStorage;
+  /** Loaded on first use; rebuilt from SQLite after hibernation or restart. */
+  private ydoc: Y.Doc | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -39,6 +50,10 @@ export class DocCell extends DurableObject<Env> {
       created_at TEXT    NOT NULL,
       updated_at TEXT    NOT NULL
     )`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS yjs_updates (
+      seq  INTEGER PRIMARY KEY AUTOINCREMENT,
+      data BLOB    NOT NULL
+    )`);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -50,6 +65,10 @@ export class DocCell extends DurableObject<Env> {
     const stored = storedCellName(this.sql);
     if (stored !== null && stored !== name) {
       return errorResponse(409, "cell_name_mismatch", `Cell belongs to ${stored}, not ${name}.`);
+    }
+
+    if (new URL(request.url).pathname === "/sync") {
+      return this.openSync(request, address.docId);
     }
 
     switch (request.method) {
@@ -83,6 +102,9 @@ export class DocCell extends DurableObject<Env> {
 
     const now = new Date().toISOString();
     const existing = this.loadRow();
+    // A body change on an existing doc goes through Yjs (loaded here, outside
+    // the transaction) so connected browsers receive it too.
+    const ydoc = existing && update.body !== undefined ? this.loadYDoc() : null;
 
     // Explicit transaction: the name claim and the document write either
     // both persist or neither does.
@@ -90,11 +112,12 @@ export class DocCell extends DurableObject<Env> {
       claimCellName(this.sql, name);
       if (existing) {
         this.sql.exec(
-          `UPDATE doc SET title = ?, body = ?, revision = revision + 1, updated_at = ? WHERE id = 1`,
+          `UPDATE doc SET title = ?, revision = revision + 1, updated_at = ? WHERE id = 1`,
           update.title ?? existing.title,
-          update.body ?? existing.body,
           now,
         );
+        // The update handler stores the change and rewrites doc.body.
+        if (ydoc) replaceText(ydoc.getText("body"), update.body!);
       } else {
         this.sql.exec(
           `INSERT INTO doc (id, title, body, revision, created_at, updated_at)
@@ -108,6 +131,85 @@ export class DocCell extends DurableObject<Env> {
     });
 
     return json(this.toState(this.loadRow()!, name, workspaceId, docId), existing ? 200 : 201);
+  }
+
+  /** Upgrades the request to a WebSocket that syncs this document. */
+  private openSync(request: Request, docId: string): Response {
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+      return errorResponse(426, "upgrade_required", "Connect with a WebSocket.");
+    }
+    if (!this.loadRow()) {
+      return errorResponse(404, "doc_not_found", `Document ${docId} has not been written yet.`);
+    }
+    const ydoc = this.loadYDoc();
+    const [client, server] = Object.values(new WebSocketPair());
+    // Hibernatable: the cell may leave memory while sockets stay open.
+    this.ctx.acceptWebSocket(server);
+    server.send(syncStep1Message(ydoc));
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {
+    if (typeof message === "string") return;
+    try {
+      const reply = handleMessage(new Uint8Array(message), this.loadYDoc(), ws);
+      if (reply) ws.send(reply);
+    } catch {
+      ws.close(1003, "Malformed Yjs message");
+    }
+  }
+
+  async webSocketClose(ws: WebSocket, code: number): Promise<void> {
+    try {
+      ws.close(code === 1005 ? 1000 : code); // 1005 ("no code") cannot be sent back
+    } catch {
+      // Already closed.
+    }
+  }
+
+  /**
+   * Returns the document's Yjs state, loading it from SQLite if needed.
+   * A document written before Yjs existed has no stored updates yet; its
+   * plain-text body becomes the initial Y.Text, once, here on the server.
+   */
+  private loadYDoc(): Y.Doc {
+    if (this.ydoc) return this.ydoc;
+    const ydoc = new Y.Doc();
+    const rows = this.sql.exec<{ data: ArrayBuffer }>(`SELECT data FROM yjs_updates ORDER BY seq`).toArray();
+    for (const row of rows) Y.applyUpdate(ydoc, new Uint8Array(row.data));
+
+    if (rows.length > COMPACT_AFTER_UPDATES) {
+      this.ctx.storage.transactionSync(() => {
+        this.sql.exec(`DELETE FROM yjs_updates`);
+        this.sql.exec(`INSERT INTO yjs_updates (data) VALUES (?)`, Y.encodeStateAsUpdate(ydoc));
+      });
+    }
+
+    ydoc.on("update", (update: Uint8Array, origin: unknown) => this.onUpdate(update, origin));
+    this.ydoc = ydoc;
+
+    const row = this.loadRow();
+    if (rows.length === 0 && row && row.body !== "") ydoc.getText("body").insert(0, row.body);
+    return ydoc;
+  }
+
+  /**
+   * Runs for every change to the Yjs document, from a browser or a PUT:
+   * stores it, refreshes the plain-text copy, and forwards it to every other
+   * connected browser. Durable Objects hold outgoing messages until these
+   * writes are durable, so nothing is forwarded before it is stored.
+   */
+  private onUpdate(update: Uint8Array, origin: unknown): void {
+    this.sql.exec(`INSERT INTO yjs_updates (data) VALUES (?)`, update);
+    this.sql.exec(
+      `UPDATE doc SET body = ?, updated_at = ? WHERE id = 1`,
+      this.ydoc!.getText("body").toString(),
+      new Date().toISOString(),
+    );
+    const message = updateMessage(update);
+    for (const ws of this.ctx.getWebSockets()) {
+      if (ws !== origin) ws.send(message);
+    }
   }
 
   private loadRow(): DocRow | undefined {

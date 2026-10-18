@@ -20,7 +20,7 @@ resource:
 | Cell class | One instance per | Stores |
 |---|---|---|
 | `WorkspaceCell` | workspace | workspace settings (display name) and the document catalogue |
-| `DocCell` | document | the document (title, body, revision) |
+| `DocCell` | document | the document (title, revision, and the body as Yjs updates plus a plain-text copy) |
 
 **SQLite per cell.** The classes are declared under `new_sqlite_classes` in
 `wrangler.jsonc`, so every instance gets its own private SQLite database,
@@ -48,6 +48,38 @@ Browser ──HTTP──▶ Worker (router) ──stub.fetch()──▶ Cell (Du
    together or not at all.
 6. The response, which includes the cell's name and id, travels back to the
    browser.
+
+## Live sync (Yjs over WebSockets)
+
+The body of a document is a Yjs `Y.Text`. Browsers that open a document
+connect to its `DocCell` at `/api/workspaces/:ws/docs/:doc/sync` and speak the
+standard Yjs sync protocol (the `y-websocket` client on the browser side):
+
+1. On connect, each side sends what it has, and the other answers with what
+   is missing. The editor appears only after this first exchange, so every
+   browser starts from the server's content.
+2. After that, every edit is sent as a small update. `DocCell` applies it to
+   its own `Y.Doc`, stores it, and forwards it to the other connections.
+
+**One source of truth.** The Yjs state, stored as an append-only log in
+`yjs_updates`, is the body. `doc.body` is a plain-text copy rewritten on
+every update, in the same handler, so REST reads and the Yjs state cannot
+disagree. A `PUT` with a body is applied to the `Y.Text` (only the changed
+range is replaced) and reaches connected browsers like any other edit.
+
+**Existing documents.** A document written before live sync has no Yjs
+updates. The first time its Yjs state is loaded, `DocCell` creates it from
+`doc.body`, once, on the server. Browsers never fill in the text themselves,
+since two browsers doing so would duplicate it.
+
+**Durability and restarts.** Updates are written to SQLite before being
+forwarded; Durable Objects hold outgoing messages until those writes are
+durable. Sockets use the Hibernation API, so an idle cell can leave memory
+with connections open and rebuild its `Y.Doc` from SQLite on the next
+message. Above 100 stored updates, loading merges them into one row.
+
+Only existing documents can be opened (`404` otherwise); documents are still
+created with `PUT`. Presence messages from the client are ignored for now.
 
 ## Document catalogue
 
@@ -98,6 +130,7 @@ documents (doc_id TEXT PRIMARY KEY, created_at)
 
 -- DocCell
 doc (id INTEGER PRIMARY KEY CHECK (id = 1), title, body, revision, created_at, updated_at)
+yjs_updates (seq INTEGER PRIMARY KEY AUTOINCREMENT, data BLOB)  -- body = merged updates
 ```
 
 `CHECK (id = 1)` allows only one row, because each database belongs to exactly
@@ -132,9 +165,8 @@ How this is verified:
 - **Phase 2 (lifecycle):** the catalogue lists docs but does not yet gate
   access to them; reads still go straight to the `DocCell`. Deleting and
   renaming documents are not implemented yet.
-- **Phase 3 (collaboration):** `DocCell` will accept WebSocket connections and
-  store Yjs updates. One cell per document is the natural single coordinator
-  for collaboration.
+- **Phase 3 (collaboration):** live sync is in place (see above). Presence
+  (who is editing, remote cursors) is next.
 - **Phase 5 (celld):** cells talk to the router only through `fetch()`, a
   small and portable interface, which should make running them on another
   runtime easier.

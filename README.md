@@ -40,7 +40,7 @@ Delete that folder to start from an empty state.
 | `npm run dev` | Vite + Worker + Durable Objects on http://localhost:5180 |
 | `npm run typecheck` | Generates Worker types, then type-checks the client, Worker and Node code |
 | `npm test` | Tests inside workerd (routing, addressing, isolation, eviction/restart) and client tests with happy-dom (editor ↔ Y.Text binding) |
-| `npm run test:integration` | Starts the real dev server, writes data, kills it (`SIGTERM` and `SIGKILL`), restarts it and reads the data back |
+| `npm run test:integration` | Starts the real dev server: restart persistence (`SIGTERM` and `SIGKILL`) and live sync between two clients |
 | `npm run test:all` | Typecheck + both test suites |
 | `npm run demo` | End-to-end demo with generated data against a running dev server |
 | `npm run build` | Production build into `dist/` (nothing is deployed) |
@@ -53,6 +53,7 @@ Delete that folder to start from an empty state.
 | `GET` / `PUT` | `/api/workspaces/:workspaceId` | `WorkspaceCell` named `workspace:<workspaceId>` |
 | `GET` | `/api/workspaces/:workspaceId/docs` | `WorkspaceCell` (the document catalogue) |
 | `GET` / `PUT` | `/api/workspaces/:workspaceId/docs/:docId` | `DocCell` named `doc:<workspaceId>/<docId>`, then `WorkspaceCell` to register it |
+| `GET` (WebSocket) | `/api/workspaces/:workspaceId/docs/:docId/sync` | `DocCell`: live Yjs sync of the body (existing docs only) |
 
 Ids use lowercase letters, digits and dashes (1–63 characters).
 `GET` returns `404` until the resource has been written once. The document
@@ -114,10 +115,13 @@ wrangler.jsonc                 bindings and SQLite migrations
 - No authentication: anyone who can reach the server can read and write any cell.
 - Reading a resource that was never written still creates an empty database
   file for that cell, because the cell creates its tables when it starts.
-- The editor keeps the open document in a Yjs `Y.Text`, but only in the
-  browser: saving sends plain text, the server stores plain text, and the
-  last write wins. Syncing between users is planned for later in Phase 3.
+- Opening a document connects it to live sync, so body edits are saved and
+  shared without pressing Save. The title still needs Save, and `revision`
+  counts saves, not live edits.
+- The body length limit (100,000 characters) is only checked on `PUT`, not on
+  live edits.
+- No presence yet: you cannot see who else has the document open.
 - Only verified locally. Nothing has been deployed to Cloudflare.
-- The client bundle is about 910 kB (about 300 kB gzipped), mostly CodeMirror,
+- The client bundle is about 930 kB (about 310 kB gzipped), mostly CodeMirror,
   the language packages that `@codemirror/lang-markdown` pulls in, and Yjs, so
   `npm run build` warns about chunk size. Loading the editor lazily is deferred.
