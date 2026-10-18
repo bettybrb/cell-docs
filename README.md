@@ -39,7 +39,7 @@ Delete that folder to start from an empty state.
 |---|---|
 | `npm run dev` | Vite + Worker + Durable Objects on http://localhost:5180 |
 | `npm run typecheck` | Generates Worker types, then type-checks the client, Worker and Node code |
-| `npm test` | Tests that run inside workerd: routing, addressing, isolation, eviction/restart |
+| `npm test` | Tests inside workerd (routing, addressing, isolation, eviction/restart) and client tests with happy-dom (editor ↔ Y.Text binding) |
 | `npm run test:integration` | Starts the real dev server, writes data, kills it (`SIGTERM` and `SIGKILL`), restarts it and reads the data back |
 | `npm run test:all` | Typecheck + both test suites |
 | `npm run demo` | End-to-end demo with generated data against a running dev server |
@@ -94,6 +94,7 @@ src/worker/cells/              WorkspaceCell, DocCell, shared cell bookkeeping
 src/shared/                    API types and dummy-data generator
 src/client/                    React page
 test/worker/                   tests that run inside workerd
+test/client/                   frontend tests (happy-dom)
 test/integration/              restart test against the real dev server
 scripts/demo.ts                command-line demo
 wrangler.jsonc                 bindings and SQLite migrations
@@ -113,9 +114,10 @@ wrangler.jsonc                 bindings and SQLite migrations
 - No authentication: anyone who can reach the server can read and write any cell.
 - Reading a resource that was never written still creates an empty database
   file for that cell, because the cell creates its tables when it starts.
-- Document bodies are plain text, and the last write wins. Real-time
-  collaboration is planned for Phase 3.
+- The editor keeps the open document in a Yjs `Y.Text`, but only in the
+  browser: saving sends plain text, the server stores plain text, and the
+  last write wins. Syncing between users is planned for later in Phase 3.
 - Only verified locally. Nothing has been deployed to Cloudflare.
-- The client bundle is about 830 kB (about 270 kB gzipped), mostly CodeMirror
-  and the language packages that `@codemirror/lang-markdown` pulls in, so
+- The client bundle is about 910 kB (about 300 kB gzipped), mostly CodeMirror,
+  the language packages that `@codemirror/lang-markdown` pulls in, and Yjs, so
   `npm run build` warns about chunk size. Loading the editor lazily is deferred.

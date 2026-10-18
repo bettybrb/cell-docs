@@ -2,12 +2,21 @@ import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 
 /**
- * Unit/integration tests that run *inside* workerd, the Workers runtime, with
- * the real Durable Object bindings declared in wrangler.jsonc.
+ * Two test projects, both run by `npm test`:
+ * - worker: tests that run *inside* workerd, the Workers runtime, with the
+ *   real Durable Object bindings declared in wrangler.jsonc.
+ * - client: frontend tests in Node with happy-dom as a simulated browser.
  */
 export default defineConfig({
-  plugins: [cloudflareTest({ wrangler: { configPath: "./wrangler.jsonc" } })],
   test: {
-    include: ["test/worker/**/*.test.ts"],
+    projects: [
+      {
+        plugins: [cloudflareTest({ wrangler: { configPath: "./wrangler.jsonc" } })],
+        test: { name: "worker", include: ["test/worker/**/*.test.ts"] },
+      },
+      {
+        test: { name: "client", include: ["test/client/**/*.test.ts"], environment: "happy-dom" },
+      },
+    ],
   },
 });

@@ -1,54 +1,42 @@
 import { markdown } from "@codemirror/lang-markdown";
-import { EditorView } from "@codemirror/view";
+import { EditorView, keymap } from "@codemirror/view";
 import { basicSetup } from "codemirror";
 import { useEffect, useRef } from "react";
+import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
+import type * as Y from "yjs";
 
-interface Props {
-  value: string;
-  onChange: (value: string) => void;
+/**
+ * Creates a CodeMirror 6 Markdown editor bound to `text`. The binding keeps
+ * the two in step: edits in the editor are applied to the Y.Text, and changes
+ * to the Y.Text appear in the editor.
+ */
+export function createMarkdownEditor(parent: Element, text: Y.Text): EditorView {
+  return new EditorView({
+    parent,
+    doc: text.toString(),
+    extensions: [
+      // Yjs undo/redo takes precedence over basicSetup's own history keys.
+      keymap.of(yUndoManagerKeymap),
+      basicSetup,
+      markdown(),
+      EditorView.lineWrapping,
+      // No awareness object: no presence or remote cursors yet.
+      yCollab(text, null),
+    ],
+  });
 }
 
 /**
- * CodeMirror 6 editor with Markdown highlighting, used like a controlled
- * <textarea>: the parent owns `value`, and every edit is reported through
- * `onChange`. Plain text in, plain text out; nothing collaborative yet.
+ * React wrapper. A new Y.Text (a different document) gets a new editor, so
+ * content and undo history never carry over between documents.
  */
-export function MarkdownEditor({ value, onChange }: Props) {
+export function MarkdownEditor({ text }: { text: Y.Text }) {
   const host = useRef<HTMLDivElement>(null);
-  const view = useRef<EditorView | null>(null);
-  const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
 
-  // Create the editor once; destroy it on unmount.
   useEffect(() => {
-    const editor = new EditorView({
-      parent: host.current!,
-      doc: value,
-      extensions: [
-        basicSetup,
-        markdown(),
-        EditorView.lineWrapping,
-        EditorView.updateListener.of((update) => {
-          if (update.docChanged) onChangeRef.current(update.state.doc.toString());
-        }),
-      ],
-    });
-    view.current = editor;
-    return () => {
-      editor.destroy();
-      view.current = null;
-    };
-  }, []);
-
-  // Replace the content when the value changes from outside (e.g. loading a doc).
-  useEffect(() => {
-    const editor = view.current;
-    if (!editor) return;
-    const current = editor.state.doc.toString();
-    if (value !== current) {
-      editor.dispatch({ changes: { from: 0, to: current.length, insert: value } });
-    }
-  }, [value]);
+    const view = createMarkdownEditor(host.current!, text);
+    return () => view.destroy();
+  }, [text]);
 
   return <div className="markdown-editor" data-testid="markdown-editor" ref={host} />;
 }

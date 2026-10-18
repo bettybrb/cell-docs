@@ -1,4 +1,4 @@
-// Browser code: the React frontend.
+// Browser code: the React frontend and its tests (run with happy-dom).
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
@@ -6,5 +6,5 @@
     "jsx": "react-jsx",
     "types": ["vite/client"]
   },
-  "include": ["src/client", "src/shared"]
+  "include": ["src/client", "src/shared", "test/client"]
 }

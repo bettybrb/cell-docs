@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { DocCatalogue, HealthResponse } from "../shared/api-types";
 import { api, type ApiResult } from "./api";
+import { createDocSession, latestOnly } from "./doc-session";
 import { MarkdownEditor } from "./MarkdownEditor";
 
 export function App() {
@@ -45,13 +46,19 @@ function CellExplorer() {
   const [displayName, setDisplayName] = useState("Sample workspace");
   const [docId, setDocId] = useState("welcome");
   const [title, setTitle] = useState("Welcome");
-  const [body, setBody] = useState("Hello from a DocCell.");
+  // The open document's body lives in a Y.Text, not in React state.
+  const [session, setSession] = useState(() => createDocSession("Hello from a DocCell."));
   const [output, setOutput] = useState<unknown>(null);
   const [docs, setDocs] = useState<DocCatalogue["docs"] | "error">([]);
 
+  const loads = useRef(latestOnly());
+
+  const display = (r: ApiResult<unknown>) =>
+    setOutput(r.ok ? { status: r.status, ...(r.data as object) } : { status: r.status, error: r.error });
+
   const show = async <T,>(p: Promise<ApiResult<T>>) => {
     const r = await p;
-    setOutput(r.ok ? { status: r.status, ...(r.data as object) } : { status: r.status, error: r.error });
+    display(r);
     return r;
   };
 
@@ -66,17 +73,23 @@ function CellExplorer() {
   }, [workspaceId]);
 
   const loadDoc = async (id: string) => {
-    setDocId(id);
-    const r = await show(api.getDoc(workspaceId, id));
+    // If another load starts before this one answers, drop this one, so a
+    // slow response cannot put one document's content under another's id.
+    const isLatest = loads.current.start();
+    const r = await api.getDoc(workspaceId, id);
+    if (!isLatest()) return;
+    display(r);
     if (r.ok) {
+      // Id, title and body switch together, onto a fresh Y.Doc.
+      setDocId(id);
       setTitle(r.data.title);
-      setBody(r.data.body);
+      setSession(createDocSession(r.data.body));
     }
     await refreshDocs(); // reading can register a Phase 1 document
   };
 
   const saveDoc = async () => {
-    await show(api.putDoc(workspaceId, docId, { title, body }));
+    await show(api.putDoc(workspaceId, docId, { title, body: session.text.toString() }));
     await refreshDocs();
   };
 
@@ -126,7 +139,7 @@ function CellExplorer() {
         </label>
         <div className="wide">
           Body (Markdown)
-          <MarkdownEditor value={body} onChange={setBody} />
+          <MarkdownEditor text={session.text} />
         </div>
         <div className="buttons">
           <button onClick={() => loadDoc(docId)}>Load doc</button>
