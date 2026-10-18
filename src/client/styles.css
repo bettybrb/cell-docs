@@ -46,3 +46,17 @@ pre {
 button[aria-current="true"] {
   font-weight: bold;
 }
+
+.markdown-editor {
+  border: 1px solid #8886;
+  font-size: 0.95rem;
+}
+
+.markdown-editor .cm-editor {
+  min-height: 12em;
+  max-height: 60vh;
+}
+
+.markdown-editor .cm-scroller {
+  overflow: auto;
+}

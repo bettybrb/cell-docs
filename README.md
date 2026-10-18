@@ -108,7 +108,7 @@ wrangler.jsonc                 bindings and SQLite migrations
 5. Compatibility testing with the open-source celld runtime
 6. Documentation, CI and handover
 
-## Known limitations (Phase 1)
+## Known limitations
 
 - No authentication: anyone who can reach the server can read and write any cell.
 - Reading a resource that was never written still creates an empty database
@@ -116,3 +116,6 @@ wrangler.jsonc                 bindings and SQLite migrations
 - Document bodies are plain text, and the last write wins. Real-time
   collaboration is planned for Phase 3.
 - Only verified locally. Nothing has been deployed to Cloudflare.
+- The client bundle is about 830 kB (about 270 kB gzipped), mostly CodeMirror
+  and the language packages that `@codemirror/lang-markdown` pulls in, so
+  `npm run build` warns about chunk size. Loading the editor lazily is deferred.
