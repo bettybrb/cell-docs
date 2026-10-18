@@ -1,0 +1,119 @@
+# Architecture
+
+This document explains how cell-docs-lab is put together and why. It covers
+Phase 1.
+
+## Key ideas
+
+**Worker.** A Worker is a small serverless function that runs for each HTTP
+request. It keeps no memory between requests, so any copy of it can handle any
+request. Here, the Worker only routes requests.
+
+**Durable Object.** A Durable Object is a single, uniquely addressable instance
+of a class. The runtime guarantees that at most one instance with a given id is
+running at a time, so requests for the same object are processed in one place,
+one at a time. That removes most locking and race-condition problems.
+
+**Cell.** In this project, a cell is one Durable Object instance that owns one
+resource:
+
+| Cell class | One instance per | Stores |
+|---|---|---|
+| `WorkspaceCell` | workspace | workspace settings (Phase 1: display name) |
+| `DocCell` | document | the document (title, body, revision) |
+
+**SQLite per cell.** The classes are declared under `new_sqlite_classes` in
+`wrangler.jsonc`, so every instance gets its own private SQLite database,
+reached through `ctx.storage.sql`. No cell can read another cell's database.
+The cell's code and its data sit together, so reads and writes are local calls,
+not network round trips. The project uses plain SQL with no ORM.
+
+## Request path
+
+```
+Browser ──HTTP──▶ Worker (router) ──stub.fetch()──▶ Cell (Durable Object) ──SQL──▶ the cell's own SQLite
+```
+
+1. The browser calls, for example, `PUT /api/workspaces/acme/docs/intro`.
+2. The Worker (`src/worker/index.ts`) matches the URL and derives a **cell
+   name**: `doc:acme/intro` (`src/worker/addressing.ts`).
+3. `env.DOC_CELL.idFromName("doc:acme/intro")` turns the name into a Durable
+   Object id. The same name always produces the same id, so there is no lookup
+   table and any Worker instance reaches the same cell.
+4. The Worker forwards only the method, body and content type, plus an
+   `x-cell-name` header that it sets itself. A client cannot choose a different
+   cell by sending that header.
+5. The cell checks the name, validates the input, and writes inside
+   `ctx.storage.transactionSync(...)`, so its SQL statements commit all
+   together or not at all.
+6. The response, which includes the cell's name and id, travels back to the
+   browser.
+
+Non-API paths never reach the Worker code: the static-asset layer serves the
+React app (`assets.run_worker_first: ["/api/*"]`).
+
+## Addressing rules
+
+- Workspace cell name: `workspace:<workspaceId>`
+- Document cell name: `doc:<workspaceId>/<docId>`. Because the name includes
+  the workspace, the same doc id in two workspaces lives in two separate cells.
+- Ids must match `^[a-z0-9][a-z0-9-]{0,62}$`, so names cannot be ambiguous.
+
+The first write to a cell records its name in a small `cell_meta` table. Every
+later request is checked against it (`409` on mismatch). This guards against a
+routing bug ever mixing two resources in one database.
+
+## Storage schema (per cell)
+
+Each cell creates its tables in its constructor with
+`CREATE TABLE IF NOT EXISTS`, which is safe to run every time the cell starts.
+
+```sql
+-- every cell
+cell_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
+
+-- WorkspaceCell
+workspace (id INTEGER PRIMARY KEY CHECK (id = 1), display_name, created_at, updated_at)
+
+-- DocCell
+doc (id INTEGER PRIMARY KEY CHECK (id = 1), title, body, revision, created_at, updated_at)
+```
+
+`CHECK (id = 1)` allows only one row, because each database belongs to exactly
+one workspace or one document.
+
+## Persistence and restarts
+
+A cell's in-memory instance can be stopped at any time: when it's idle, during
+a deploy, or if a process crashes. The SQLite database stays. When the next
+request arrives, a fresh instance is constructed and reads its state back from
+SQLite. A write's response is only sent once the data is durably stored.
+
+How this is verified:
+
+- `test/worker/cells.test.ts` evicts a cell from memory, proves the new
+  instance is fresh, and reads the data back.
+- `test/integration/restart.test.ts` stops the whole local server (gracefully
+  with `SIGTERM`, and as a simulated crash with `SIGKILL`), restarts it on the
+  same state directory, and reads the data back. As a control, the test fails
+  when persistence is turned off.
+
+## Local development stack
+
+- **Vite** serves the React app. The **Cloudflare Vite plugin** runs the Worker
+  and its Durable Objects in workerd, using the same `wrangler.jsonc`.
+- Local state lives in `.wrangler/state/`, with one `.sqlite` file per cell.
+- **Vitest** with `@cloudflare/vitest-plugin` runs the tests inside workerd
+  with the real bindings.
+
+## Boundaries for later phases
+
+- **Phase 2 (catalogue):** `WorkspaceCell` will gain a `documents` table and
+  become the authority on which docs exist. The router will check it before
+  routing to a `DocCell`.
+- **Phase 3 (collaboration):** `DocCell` will accept WebSocket connections and
+  store Yjs updates. One cell per document is the natural single coordinator
+  for collaboration.
+- **Phase 5 (celld):** cells talk to the router only through `fetch()`, a
+  small and portable interface, which should make running them on another
+  runtime easier.
