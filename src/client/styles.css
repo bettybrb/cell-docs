@@ -1,0 +1,44 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color-scheme: light dark;
+  line-height: 1.5;
+}
+
+main {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+section {
+  border-top: 1px solid #8884;
+  padding: 8px 0 16px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px 16px;
+  align-items: end;
+}
+
+.grid .wide {
+  grid-column: 1 / -1;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.9em;
+}
+
+.buttons {
+  display: flex;
+  gap: 8px;
+}
+
+pre {
+  background: #8881;
+  padding: 8px;
+  overflow-x: auto;
+}
