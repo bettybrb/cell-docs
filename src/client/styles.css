@@ -42,3 +42,7 @@ pre {
   padding: 8px;
   overflow-x: auto;
 }
+
+button[aria-current="true"] {
+  font-weight: bold;
+}
