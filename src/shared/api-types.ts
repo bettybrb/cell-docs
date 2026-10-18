@@ -37,6 +37,13 @@ export interface DocState {
   updatedAt: string;
 }
 
+/** The documents registered in a workspace's catalogue, oldest first. */
+export interface DocCatalogue {
+  cell: CellInfo;
+  workspaceId: string;
+  docs: { docId: string; createdAt: string }[];
+}
+
 export interface UpdateWorkspaceRequest {
   displayName: string;
 }

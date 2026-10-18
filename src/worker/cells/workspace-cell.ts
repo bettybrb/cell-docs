@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
-import type { WorkspaceState } from "../../shared/api-types";
-import { parseCellName } from "../addressing";
+import type { DocCatalogue, WorkspaceState } from "../../shared/api-types";
+import { isValidId, parseCellName } from "../addressing";
 import { CELL_NAME_HEADER, errorResponse, json, readJsonObject } from "../http";
 import { cellInfo, claimCellName, createCellMetaTable, storedCellName } from "./cell-meta";
 
@@ -13,10 +13,21 @@ interface WorkspaceRow {
   [column: string]: SqlStorageValue;
 }
 
+interface DocumentRow {
+  doc_id: string;
+  created_at: string;
+  [column: string]: SqlStorageValue;
+}
+
 /**
- * One WorkspaceCell per workspace. For now it stores only workspace settings
- * (a display name). The next phase adds the resource catalogue here: the
- * list of documents that belong to the workspace.
+ * One WorkspaceCell per workspace. It stores the workspace settings (a display
+ * name) and the document catalogue: the list of documents that belong to the
+ * workspace.
+ *
+ * Paths inside the cell (set by the router, never by clients directly):
+ *   /              GET / PUT workspace settings
+ *   /docs          GET the catalogue
+ *   /docs/<docId>  PUT registers a document (idempotent)
  */
 export class WorkspaceCell extends DurableObject<Env> {
   private readonly sql: SqlStorage;
@@ -31,6 +42,10 @@ export class WorkspaceCell extends DurableObject<Env> {
       created_at   TEXT NOT NULL,
       updated_at   TEXT NOT NULL
     )`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS documents (
+      doc_id     TEXT PRIMARY KEY,
+      created_at TEXT NOT NULL
+    )`);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -44,14 +59,52 @@ export class WorkspaceCell extends DurableObject<Env> {
       return errorResponse(409, "cell_name_mismatch", `Cell belongs to ${stored}, not ${name}.`);
     }
 
-    switch (request.method) {
-      case "GET":
-        return this.read(name, address.workspaceId);
-      case "PUT":
-        return this.write(request, name, address.workspaceId);
-      default:
-        return errorResponse(405, "method_not_allowed", `${request.method} is not supported.`);
+    const [section, docId, ...rest] = new URL(request.url).pathname.split("/").filter(Boolean);
+    if (section === undefined) {
+      if (request.method === "GET") return this.read(name, address.workspaceId);
+      if (request.method === "PUT") return this.write(request, name, address.workspaceId);
+    } else if (section === "docs" && docId === undefined) {
+      if (request.method === "GET") return this.listDocs(name, address.workspaceId);
+    } else if (section === "docs" && rest.length === 0 && isValidId(docId)) {
+      if (request.method === "PUT") return this.registerDoc(request, name, docId);
+    } else {
+      return errorResponse(404, "not_found", "Unknown workspace cell path.");
     }
+    return errorResponse(405, "method_not_allowed", `${request.method} is not supported.`);
+  }
+
+  private listDocs(name: string, workspaceId: string): Response {
+    const rows = this.sql
+      .exec<DocumentRow>(`SELECT doc_id, created_at FROM documents ORDER BY created_at, doc_id`)
+      .toArray();
+    const catalogue: DocCatalogue = {
+      cell: cellInfo("workspace", name, this.ctx),
+      workspaceId,
+      docs: rows.map((row) => ({ docId: row.doc_id, createdAt: row.created_at })),
+    };
+    return json(catalogue);
+  }
+
+  /**
+   * Adds a document to the catalogue. Safe to repeat: an existing entry is
+   * left unchanged, so retries and re-registrations are harmless.
+   */
+  private async registerDoc(request: Request, name: string, docId: string): Promise<Response> {
+    const body = await readJsonObject(request);
+    if (body instanceof Response) return body;
+    const { createdAt } = body;
+    if (typeof createdAt !== "string" || createdAt === "") {
+      return errorResponse(400, "invalid_body", "createdAt must be a non-empty string.");
+    }
+
+    const exists = this.sql.exec(`SELECT 1 FROM documents WHERE doc_id = ?`, docId).toArray().length > 0;
+    if (exists) return new Response(null, { status: 204 });
+
+    this.ctx.storage.transactionSync(() => {
+      claimCellName(this.sql, name);
+      this.sql.exec(`INSERT OR IGNORE INTO documents (doc_id, created_at) VALUES (?, ?)`, docId, createdAt);
+    });
+    return new Response(null, { status: 201 });
   }
 
   private read(name: string, workspaceId: string): Response {
