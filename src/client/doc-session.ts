@@ -1,3 +1,4 @@
+import type { Awareness } from "y-protocols/awareness";
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
 
@@ -22,9 +23,23 @@ export function createDocSession(body: string): DocSession {
   return { ydoc, text };
 }
 
+export type ConnectionStatus = "connecting" | "connected" | "disconnected";
+
+/** What each browser shares about itself. `color`/`colorLight` style its cursor. */
+export interface Collaborator {
+  name: string;
+  color: string;
+  colorLight: string;
+}
+
 export interface ConnectedDocSession extends DocSession {
+  /** Presence: who is connected to this document (including this browser). */
+  awareness: Awareness;
   /** Resolves once the first exchange with the DocCell is done. */
   synced: Promise<void>;
+  status(): ConnectionStatus;
+  /** Calls `listener` on every status change; returns an unsubscribe function. */
+  onStatus(listener: (status: ConnectionStatus) => void): () => void;
   /** Closes the connection. Call before switching documents. */
   destroy(): void;
 }
@@ -42,7 +57,7 @@ export interface ConnectedDocSession extends DocSession {
 export function connectDocSession(
   serverUrl: string,
   docId: string,
-  options: { WebSocketPolyfill?: typeof WebSocket } = {},
+  { user = randomGuest(), ...options }: { user?: Collaborator; WebSocketPolyfill?: typeof WebSocket } = {},
 ): ConnectedDocSession {
   const ydoc = new Y.Doc();
   const provider = new WebsocketProvider(serverUrl, `${docId}/sync`, ydoc, {
@@ -57,10 +72,33 @@ export function connectDocSession(
     if (provider.synced) resolve();
     else provider.once("sync", () => resolve());
   });
+
+  const { awareness } = provider;
+  awareness.setLocalStateField("user", user);
+
+  let status: ConnectionStatus = "connecting";
+  const listeners = new Set<(status: ConnectionStatus) => void>();
+  provider.on("status", (event) => {
+    status = event.status;
+    if (status === "connected") {
+      // While this browser was away, the others were told it left. Re-sending
+      // the same presence with a higher clock makes them accept it again
+      // (an update with the old clock would be ignored).
+      awareness.setLocalState(awareness.getLocalState());
+    }
+    listeners.forEach((listener) => listener(status));
+  });
+
   return {
     ydoc,
     text: ydoc.getText("body"),
+    awareness,
     synced,
+    status: () => status,
+    onStatus(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
     destroy() {
       provider.destroy();
       ydoc.destroy();
@@ -80,4 +118,11 @@ export function latestOnly(): { start: () => () => boolean } {
       return () => id === current;
     },
   };
+}
+
+const COLORS = ["#d1495b", "#00798c", "#edae49", "#66a182", "#8d5a97", "#2e86ab"];
+
+function randomGuest(): Collaborator {
+  const color = COLORS[Math.floor(Math.random() * COLORS.length)];
+  return { name: `Guest-${Math.floor(100 + Math.random() * 900)}`, color, colorLight: `${color}33` };
 }

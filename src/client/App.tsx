@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { DocCatalogue, HealthResponse } from "../shared/api-types";
 import { api, type ApiResult } from "./api";
-import { connectDocSession, createDocSession, latestOnly, type DocSession } from "./doc-session";
+import { connectDocSession, createDocSession, latestOnly, type ConnectedDocSession } from "./doc-session";
 import { MarkdownEditor } from "./MarkdownEditor";
+import { PresenceBar } from "./PresenceBar";
 
 export function App() {
   return (
@@ -50,7 +51,7 @@ function CellExplorer() {
   // saved document is opened, then that document's live-synced Y.Text.
   const [draft] = useState(() => createDocSession("Hello from a DocCell."));
   const [opened, setOpened] = useState<{ workspaceId: string; docId: string } | null>(null);
-  const [live, setLive] = useState<DocSession | null>(null);
+  const [live, setLive] = useState<ConnectedDocSession | null>(null);
   const text = opened ? live?.text : draft.text;
   const [output, setOutput] = useState<unknown>(null);
   const [docs, setDocs] = useState<DocCatalogue["docs"] | "error">([]);
@@ -164,7 +165,8 @@ function CellExplorer() {
         </label>
         <div className="wide">
           Body (Markdown)
-          {text ? <MarkdownEditor text={text} /> : <p>Connecting…</p>}
+          {live && <PresenceBar session={live} />}
+          {text ? <MarkdownEditor text={text} awareness={live?.awareness ?? null} /> : <p>Connecting…</p>}
         </div>
         <div className="buttons">
           <button onClick={() => loadDoc(docId)}>Load doc</button>

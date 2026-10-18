@@ -60,3 +60,16 @@ button[aria-current="true"] {
 .markdown-editor .cm-scroller {
   overflow: auto;
 }
+
+.presence {
+  margin: 4px 0;
+  font-size: 0.9em;
+}
+
+.presence .dot {
+  display: inline-block;
+  width: 0.6em;
+  height: 0.6em;
+  border-radius: 50%;
+  margin-right: 0.25em;
+}

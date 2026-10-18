@@ -34,6 +34,24 @@ describe("connected doc session", () => {
     session.destroy();
   });
 
+  it("shares the user's presence and re-announces it with a higher clock on every connect", () => {
+    const user = { name: "Ada", color: "#000000", colorLight: "#00000033" };
+    const session = connectDocSession("ws://host/api/workspaces/acme/docs", "intro", { ...options, user });
+    const statuses: string[] = [];
+    session.onStatus((status) => statuses.push(status));
+    expect(session.awareness.getLocalState()).toEqual({ user });
+    const clockBefore = session.awareness.meta.get(session.awareness.clientID)!.clock;
+
+    const socket = FakeWebSocket.instances.at(-1)!;
+    socket.readyState = 1;
+    socket.onopen!();
+
+    expect(statuses).toEqual(["connected"]);
+    expect(session.status()).toBe("connected");
+    expect(session.awareness.meta.get(session.awareness.clientID)!.clock).toBeGreaterThan(clockBefore);
+    session.destroy();
+  });
+
   it("closes the old connection when switching documents", () => {
     const a = connectDocSession("ws://host/api/workspaces/acme/docs", "doc-a", options);
     const socketA = FakeWebSocket.instances.at(-1)!;
