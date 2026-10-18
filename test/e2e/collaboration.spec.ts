@@ -49,12 +49,9 @@ async function newBrowser(browser: Browser): Promise<Page> {
   return context.newPage();
 }
 
-/** Loads the app and opens the document; resolves once it is live-synced. */
+/** Opens the document by its URL; resolves once it is live-synced. */
 async function openDoc(page: Page, ids: { ws: string; doc: string }): Promise<void> {
-  await page.goto(server.baseUrl);
-  await page.getByLabel("Workspace id").fill(ids.ws);
-  await page.getByLabel("Doc id").fill(ids.doc);
-  await page.getByRole("button", { name: "Load doc" }).click();
+  await page.goto(`${server.baseUrl}/?workspace=${ids.ws}&doc=${ids.doc}`);
   await expect(status(page)).toHaveAttribute("data-status", "connected");
   await expect(editor(page)).toBeVisible();
 }
@@ -172,6 +169,39 @@ test("a browser that loses its connection reconnects and keeps every edit", asyn
   await expectContains(a, "B meanwhile.");
   await expectText(a, await docText(b));
   await expect(collaboratorCount(b)).toHaveText("2");
+});
+
+test("refreshing the page reopens the same document with its latest content", async ({ browser }) => {
+  const ids = await createDoc("Saved.");
+  const page = await newBrowser(browser);
+  // Open it the way a user does: type the ids and click "Load doc".
+  await page.goto(server.baseUrl);
+  await page.getByLabel("Workspace id").fill(ids.ws);
+  await page.getByLabel("Doc id").fill(ids.doc);
+  await page.getByRole("button", { name: "Load doc" }).click();
+  await expect(status(page)).toHaveAttribute("data-status", "connected");
+  await typeAtEnd(page, " Edited live.");
+  await expect(page).toHaveURL(new RegExp(`workspace=${ids.ws}&doc=${ids.doc}`));
+
+  // Wait until the server has the edit, then reload: no clicking needed.
+  await expect
+    .poll(async () => (await request<DocState>(server.baseUrl, "GET", `/api/workspaces/${ids.ws}/docs/${ids.doc}`)).data.body)
+    .toBe("Saved. Edited live.");
+  await page.reload();
+  await expect(status(page)).toHaveAttribute("data-status", "connected");
+  await expectText(page, "Saved. Edited live.");
+  await expect(page.getByLabel("Doc id")).toHaveValue(ids.doc);
+  await expect(page.getByLabel("Title")).toHaveValue("Shared");
+});
+
+test("the start page opens the saved sample document, not a stale draft", async ({ browser }) => {
+  const path = "/api/workspaces/sample-workspace/docs/welcome";
+  await request(server.baseUrl, "PUT", path, { title: "Welcome (edited)", body: "Newest welcome text." });
+  const page = await newBrowser(browser);
+  await page.goto(server.baseUrl);
+  await expect(status(page)).toHaveAttribute("data-status", "connected");
+  await expectText(page, "Newest welcome text.");
+  await expect(page.getByLabel("Title")).toHaveValue("Welcome (edited)");
 });
 
 test("content survives a backend restart, including edits made during the outage", async ({ browser }) => {

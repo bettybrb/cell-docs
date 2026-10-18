@@ -43,16 +43,21 @@ function BackendStatus() {
  * which cell answered (name and id), so you can see routing and isolation.
  */
 function CellExplorer() {
-  const [workspaceId, setWorkspaceId] = useState("sample-workspace");
+  // The open document is kept in the URL (?workspace=…&doc=…), so a page
+  // reload reopens it; without one, the sample document is opened.
+  const [workspaceId, setWorkspaceId] = useState(() => urlParam("workspace") ?? "sample-workspace");
   const [displayName, setDisplayName] = useState("Sample workspace");
-  const [docId, setDocId] = useState("welcome");
+  const [docId, setDocId] = useState(() => urlParam("doc") ?? "welcome");
   const [title, setTitle] = useState("Welcome");
   // The body lives in a Y.Text, not in React state: a local draft until a
   // saved document is opened, then that document's live-synced Y.Text.
   const [draft] = useState(() => createDocSession("Hello from a DocCell."));
   const [opened, setOpened] = useState<{ workspaceId: string; docId: string } | null>(null);
   const [live, setLive] = useState<ConnectedDocSession | null>(null);
-  const text = opened ? live?.text : draft.text;
+  // False until the first load has answered, so the draft is not shown in
+  // place of a saved document that is still loading.
+  const [ready, setReady] = useState(false);
+  const text = opened ? live?.text : ready ? draft.text : undefined;
   const [output, setOutput] = useState<unknown>(null);
   const [docs, setDocs] = useState<DocCatalogue["docs"] | "error">([]);
 
@@ -87,18 +92,33 @@ function CellExplorer() {
     };
   }, [opened]);
 
+  // Open the document from the URL (or the default) when the page loads.
+  // If it does not exist yet, the local draft is shown instead.
+  useEffect(() => {
+    void loadDoc(docId, { quiet: true });
+  }, []);
+
+  // Keep the URL pointing at the open document.
+  useEffect(() => {
+    if (!opened) return;
+    const query = new URLSearchParams({ workspace: opened.workspaceId, doc: opened.docId });
+    history.replaceState(null, "", `?${query}`);
+  }, [opened]);
+
   // Reload the catalogue whenever the workspace id changes.
   useEffect(() => {
     void refreshDocs();
   }, [workspaceId]);
 
-  const loadDoc = async (id: string) => {
+  /** `quiet`: don't show a "not found" error (used for the automatic load on page open). */
+  const loadDoc = async (id: string, { quiet = false } = {}) => {
     // If another load starts before this one answers, drop this one, so a
     // slow response cannot put one document's content under another's id.
     const isLatest = loads.current.start();
     const r = await api.getDoc(workspaceId, id);
     if (!isLatest()) return;
-    display(r);
+    if (r.ok || !quiet) display(r);
+    setReady(true);
     if (r.ok) {
       // Id, title and body switch together; the body comes from the sync.
       setDocId(id);
@@ -178,6 +198,10 @@ function CellExplorer() {
       {output !== null && <pre data-testid="explorer-output">{JSON.stringify(output, null, 2)}</pre>}
     </section>
   );
+}
+
+function urlParam(name: string): string | null {
+  return new URLSearchParams(location.search).get(name);
 }
 
 /** WebSocket base URL for a workspace's documents, on the same host as the page. */
