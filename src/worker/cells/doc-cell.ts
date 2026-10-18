@@ -4,12 +4,27 @@ import type { DocState, UpdateDocRequest } from "../../shared/api-types";
 import { parseCellName } from "../addressing";
 import { CELL_NAME_HEADER, errorResponse, json, readJsonObject } from "../http";
 import { cellInfo, claimCellName, createCellMetaTable, storedCellName } from "./cell-meta";
-import { handleMessage, replaceText, syncStep1Message, updateMessage } from "./yjs-sync";
+import {
+  awarenessMessage,
+  handleMessage,
+  isAwarenessMessage,
+  readAwarenessMessage,
+  replaceText,
+  syncStep1Message,
+  updateMessage,
+  type PresenceEntry,
+} from "./yjs-sync";
 
 const MAX_TITLE_LENGTH = 200;
 const MAX_BODY_LENGTH = 100_000;
 /** Above this many stored updates, loading merges them into one row. */
 const COMPACT_AFTER_UPDATES = 100;
+
+/**
+ * Presence of the client(s) on one socket, stored as the socket's attachment
+ * so it survives hibernation. Keyed by Yjs client id.
+ */
+type SocketPresence = Record<string, { clock: number; state: unknown }>;
 
 interface DocRow {
   title: string;
@@ -146,20 +161,67 @@ export class DocCell extends DurableObject<Env> {
     // Hibernatable: the cell may leave memory while sockets stay open.
     this.ctx.acceptWebSocket(server);
     server.send(syncStep1Message(ydoc));
+    // Tell the newcomer who is already here.
+    const present = this.ctx.getWebSockets().flatMap((ws) => presenceEntries(ws));
+    if (present.length > 0) server.send(awarenessMessage(present));
     return new Response(null, { status: 101, webSocket: client });
   }
 
   async webSocketMessage(ws: WebSocket, message: ArrayBuffer | string): Promise<void> {
     if (typeof message === "string") return;
+    const data = new Uint8Array(message);
     try {
-      const reply = handleMessage(new Uint8Array(message), this.loadYDoc(), ws);
+      if (isAwarenessMessage(data)) {
+        this.relayPresence(ws, data);
+        return;
+      }
+      const reply = handleMessage(data, this.loadYDoc(), ws);
       if (reply) ws.send(reply);
     } catch {
       ws.close(1003, "Malformed Yjs message");
     }
   }
 
+  /** Remembers the sender's presence on its socket and forwards the message to everyone else. */
+  private relayPresence(ws: WebSocket, data: Uint8Array): void {
+    const presence: SocketPresence = ws.deserializeAttachment() ?? {};
+    for (const entry of readAwarenessMessage(data)) {
+      if (entry.state === null) delete presence[entry.clientId];
+      else presence[entry.clientId] = { clock: entry.clock, state: entry.state };
+    }
+    ws.serializeAttachment(presence);
+    this.broadcast(data, ws);
+  }
+
+  /**
+   * A socket closed, cleanly or not (tab closed, network lost, crash). Tell
+   * the others its clients left: state null at the last clock seen, which
+   * the y-protocols awareness module accepts as a removal.
+   */
+  private announceLeave(ws: WebSocket): void {
+    const left = presenceEntries(ws).map((entry) => ({ ...entry, state: null }));
+    if (left.length === 0) return;
+    ws.serializeAttachment({});
+    this.broadcast(awarenessMessage(left), ws);
+  }
+
+  private broadcast(message: Uint8Array, except: unknown): void {
+    for (const ws of this.ctx.getWebSockets()) {
+      if (ws === except) continue;
+      try {
+        ws.send(message);
+      } catch {
+        // The socket is closing; its own close handler cleans up.
+      }
+    }
+  }
+
+  async webSocketError(ws: WebSocket): Promise<void> {
+    this.announceLeave(ws);
+  }
+
   async webSocketClose(ws: WebSocket, code: number): Promise<void> {
+    this.announceLeave(ws);
     try {
       ws.close(code === 1005 ? 1000 : code); // 1005 ("no code") cannot be sent back
     } catch {
@@ -206,10 +268,7 @@ export class DocCell extends DurableObject<Env> {
       this.ydoc!.getText("body").toString(),
       new Date().toISOString(),
     );
-    const message = updateMessage(update);
-    for (const ws of this.ctx.getWebSockets()) {
-      if (ws !== origin) ws.send(message);
-    }
+    this.broadcast(updateMessage(update), origin);
   }
 
   private loadRow(): DocRow | undefined {
@@ -242,4 +301,9 @@ function validateUpdate(input: Record<string, unknown>): UpdateDocRequest | stri
     return `body must be a string of at most ${MAX_BODY_LENGTH} characters.`;
   }
   return { title, body } as UpdateDocRequest;
+}
+
+function presenceEntries(ws: WebSocket): PresenceEntry[] {
+  const presence: SocketPresence = ws.deserializeAttachment() ?? {};
+  return Object.entries(presence).map(([clientId, { clock, state }]) => ({ clientId: Number(clientId), clock, state }));
 }

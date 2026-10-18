@@ -6,10 +6,11 @@ import type * as Y from "yjs";
 /**
  * The parts of the standard Yjs WebSocket protocol (as spoken by the
  * `y-websocket` client) that DocCell uses. Every message starts with a type:
- * 0 = sync (state exchange and updates), 1 = awareness (presence; ignored
- * until presence is implemented).
+ * 0 = sync (state exchange and updates), 1 = awareness (presence: who is
+ * connected, their name and cursor).
  */
 const MESSAGE_SYNC = 0;
+const MESSAGE_AWARENESS = 1;
 
 /** "Here is what I have": the other side answers with what is missing. */
 export function syncStep1Message(ydoc: Y.Doc): Uint8Array {
@@ -64,4 +65,49 @@ export function replaceText(text: Y.Text, next: string): void {
     text.delete(start, current.length - start - end);
     text.insert(start, next.slice(start, next.length - end));
   });
+}
+
+/**
+ * One client's presence as carried by an awareness message. `clock` grows
+ * with every change; a `state` of null means the client has left.
+ */
+export interface PresenceEntry {
+  clientId: number;
+  clock: number;
+  state: unknown;
+}
+
+export function isAwarenessMessage(data: Uint8Array): boolean {
+  return decoding.readVarUint(decoding.createDecoder(data)) === MESSAGE_AWARENESS;
+}
+
+/** Reads the entries of an awareness message. Throws on malformed input. */
+export function readAwarenessMessage(data: Uint8Array): PresenceEntry[] {
+  const outer = decoding.createDecoder(data);
+  decoding.readVarUint(outer); // message type
+  const decoder = decoding.createDecoder(decoding.readVarUint8Array(outer));
+  const entries: PresenceEntry[] = [];
+  const count = decoding.readVarUint(decoder);
+  for (let i = 0; i < count; i++) {
+    const clientId = decoding.readVarUint(decoder);
+    const clock = decoding.readVarUint(decoder);
+    const state: unknown = JSON.parse(decoding.readVarString(decoder));
+    entries.push({ clientId, clock, state });
+  }
+  return entries;
+}
+
+/** Encodes entries in the same format the y-protocols awareness module uses. */
+export function awarenessMessage(entries: PresenceEntry[]): Uint8Array {
+  const update = encoding.createEncoder();
+  encoding.writeVarUint(update, entries.length);
+  for (const entry of entries) {
+    encoding.writeVarUint(update, entry.clientId);
+    encoding.writeVarUint(update, entry.clock);
+    encoding.writeVarString(update, JSON.stringify(entry.state));
+  }
+  const encoder = encoding.createEncoder();
+  encoding.writeVarUint(encoder, MESSAGE_AWARENESS);
+  encoding.writeVarUint8Array(encoder, encoding.toUint8Array(update));
+  return encoding.toUint8Array(encoder);
 }

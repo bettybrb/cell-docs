@@ -1,10 +1,18 @@
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as decoding from "lib0/decoding";
+import * as encoding from "lib0/encoding";
+import * as awarenessProtocol from "y-protocols/awareness";
 import * as Y from "yjs";
 import type { DocState } from "../../src/shared/api-types";
 import { docCellName } from "../../src/worker/addressing";
-import { handleMessage, syncStep1Message, updateMessage } from "../../src/worker/cells/yjs-sync";
+import {
+  handleMessage,
+  isAwarenessMessage,
+  syncStep1Message,
+  updateMessage,
+} from "../../src/worker/cells/yjs-sync";
 import { api, uniqueId } from "./helpers";
 
 const docPath = (ws: string, doc: string) => `/api/workspaces/${ws}/docs/${doc}`;
@@ -12,12 +20,15 @@ const docPath = (ws: string, doc: string) => `/api/workspaces/${ws}/docs/${doc}`
 interface Client {
   socket: WebSocket;
   text: Y.Text;
+  awareness: awarenessProtocol.Awareness;
   closed: Promise<CloseEvent>;
 }
 
 const open: WebSocket[] = [];
+const awarenesses: awarenessProtocol.Awareness[] = [];
 
 afterEach(() => {
+  awarenesses.splice(0).forEach((awareness) => awareness.destroy());
   for (const socket of open.splice(0)) {
     try {
       socket.close(1000);
@@ -39,17 +50,47 @@ async function connect(ws: string, doc: string): Promise<Client> {
   open.push(socket);
 
   const ydoc = new Y.Doc();
+  const awareness = new awarenessProtocol.Awareness(ydoc);
+  awareness.setLocalState(null); // like y-websocket: no presence until the app sets it
+  awarenesses.push(awareness);
   const closed = new Promise<CloseEvent>((resolve) => socket.addEventListener("close", resolve));
+  const send = (data: Uint8Array) => {
+    if (socket.readyState === WebSocket.OPEN) socket.send(data);
+  };
   socket.addEventListener("message", (event) => {
-    const reply = handleMessage(new Uint8Array(event.data as ArrayBuffer), ydoc, socket);
-    if (reply) socket.send(reply);
+    const data = new Uint8Array(event.data as ArrayBuffer);
+    if (isAwarenessMessage(data)) {
+      const decoder = decoding.createDecoder(data);
+      decoding.readVarUint(decoder);
+      awarenessProtocol.applyAwarenessUpdate(awareness, decoding.readVarUint8Array(decoder), socket);
+      return;
+    }
+    const reply = handleMessage(data, ydoc, socket);
+    if (reply) send(reply);
   });
   ydoc.on("update", (update: Uint8Array, origin: unknown) => {
-    if (origin !== socket) socket.send(updateMessage(update));
+    if (origin !== socket) send(updateMessage(update));
+  });
+  awareness.on("update", ({ added, updated, removed }: Record<string, number[]>, origin: unknown) => {
+    if (origin === socket) return;
+    const encoder = encoding.createEncoder();
+    encoding.writeVarUint(encoder, 1);
+    encoding.writeVarUint8Array(
+      encoder,
+      awarenessProtocol.encodeAwarenessUpdate(awareness, [...added, ...updated, ...removed]),
+    );
+    send(encoding.toUint8Array(encoder));
   });
   socket.send(syncStep1Message(ydoc));
-  return { socket, text: ydoc.getText("body"), closed };
+  return { socket, text: ydoc.getText("body"), awareness, closed };
 }
+
+/** Names of the *other* clients this client currently sees. */
+const othersSeenBy = (client: Client) =>
+  [...client.awareness.getStates()]
+    .filter(([id]) => id !== client.awareness.clientID)
+    .map(([, state]) => (state as { name: string }).name)
+    .sort();
 
 const docStub = (ws: string, doc: string) => env.DOC_CELL.get(env.DOC_CELL.idFromName(docCellName(ws, doc)));
 
@@ -153,5 +194,77 @@ describe("sync endpoint", () => {
 
     const good = await connect(ws, doc);
     await vi.waitFor(() => expect(good.text.toString()).toBe("safe"));
+  });
+});
+
+describe("presence (awareness)", () => {
+  it("shows who is already connected to a newcomer, and the newcomer to them", async () => {
+    const [ws, doc] = [uniqueId("ws"), uniqueId("doc")];
+    await api("PUT", docPath(ws, doc), { body: "x" });
+    const a = await connect(ws, doc);
+    a.awareness.setLocalState({ name: "A" });
+    const b = await connect(ws, doc);
+    await vi.waitFor(() => expect(othersSeenBy(b)).toEqual(["A"]));
+
+    b.awareness.setLocalState({ name: "B" });
+    await vi.waitFor(() => expect(othersSeenBy(a)).toEqual(["B"]));
+  });
+
+  it("removes a client that leaves cleanly", async () => {
+    const [ws, doc] = [uniqueId("ws"), uniqueId("doc")];
+    await api("PUT", docPath(ws, doc), { body: "x" });
+    const a = await connect(ws, doc);
+    const b = await connect(ws, doc);
+    a.awareness.setLocalState({ name: "A" });
+    b.awareness.setLocalState({ name: "B" });
+    await vi.waitFor(() => expect(othersSeenBy(a)).toEqual(["B"]));
+
+    b.awareness.setLocalState(null); // what y-websocket sends when a tab closes
+    await vi.waitFor(() => expect(othersSeenBy(a)).toEqual([]));
+  });
+
+  it("removes a client whose connection drops without saying goodbye", async () => {
+    const [ws, doc] = [uniqueId("ws"), uniqueId("doc")];
+    await api("PUT", docPath(ws, doc), { body: "x" });
+    const a = await connect(ws, doc);
+    const b = await connect(ws, doc);
+    const c = await connect(ws, doc);
+    a.awareness.setLocalState({ name: "A" });
+    b.awareness.setLocalState({ name: "B" });
+    c.awareness.setLocalState({ name: "C" });
+    await vi.waitFor(() => expect(othersSeenBy(a)).toEqual(["B", "C"]));
+
+    b.socket.close(1001); // no awareness removal sent first
+    await vi.waitFor(() => {
+      expect(othersSeenBy(a)).toEqual(["C"]);
+      expect(othersSeenBy(c)).toEqual(["A"]);
+    });
+  });
+
+  it("accepts a client back after it dropped, once its clock moves on", async () => {
+    const [ws, doc] = [uniqueId("ws"), uniqueId("doc")];
+    await api("PUT", docPath(ws, doc), { body: "x" });
+    const a = await connect(ws, doc);
+    const b = await connect(ws, doc);
+    b.awareness.setLocalState({ name: "B" });
+    await vi.waitFor(() => expect(othersSeenBy(a)).toEqual(["B"]));
+    b.socket.close(1001);
+    await vi.waitFor(() => expect(othersSeenBy(a)).toEqual([]));
+
+    // B reconnects with the same client id and a higher clock (the client
+    // bumps its clock on every connect; see connectDocSession).
+    const again = await connect(ws, doc);
+    const state = { name: "B" };
+    const clock = b.awareness.meta.get(b.awareness.clientID)!.clock + 1;
+    const update = encoding.createEncoder();
+    encoding.writeVarUint(update, 1);
+    encoding.writeVarUint(update, b.awareness.clientID);
+    encoding.writeVarUint(update, clock);
+    encoding.writeVarString(update, JSON.stringify(state));
+    const message = encoding.createEncoder();
+    encoding.writeVarUint(message, 1);
+    encoding.writeVarUint8Array(message, encoding.toUint8Array(update));
+    again.socket.send(encoding.toUint8Array(message));
+    await vi.waitFor(() => expect(othersSeenBy(a)).toEqual(["B"]));
   });
 });
