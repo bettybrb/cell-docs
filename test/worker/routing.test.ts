@@ -14,6 +14,7 @@ describe("matchRoute", () => {
       workspaceId: "acme",
       docId: "intro",
     });
+    expect(matchRoute("/api/workspaces/acme/docs")).toEqual({ type: "docs", workspaceId: "acme" });
   });
 
   it("rejects everything else", () => {
@@ -22,7 +23,7 @@ describe("matchRoute", () => {
       "/api",
       "/api/workspaces",
       "/api/workspaces/Bad_Id",
-      "/api/workspaces/acme/docs",
+      "/api/workspaces/Bad_Id/docs",
       "/api/workspaces/acme/files/intro",
       "/api/workspaces/acme/docs/intro/extra",
       "/other/workspaces/acme",
