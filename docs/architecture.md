@@ -1,7 +1,7 @@
 # Architecture
 
 This document explains how cell-docs-lab is put together and why. It covers
-Phase 1.
+Phase 1 and the Phase 2 document catalogue.
 
 ## Key ideas
 
@@ -19,7 +19,7 @@ resource:
 
 | Cell class | One instance per | Stores |
 |---|---|---|
-| `WorkspaceCell` | workspace | workspace settings (Phase 1: display name) |
+| `WorkspaceCell` | workspace | workspace settings (display name) and the document catalogue |
 | `DocCell` | document | the document (title, body, revision) |
 
 **SQLite per cell.** The classes are declared under `new_sqlite_classes` in
@@ -49,6 +49,26 @@ Browser ──HTTP──▶ Worker (router) ──stub.fetch()──▶ Cell (Du
 6. The response, which includes the cell's name and id, travels back to the
    browser.
 
+## Document catalogue
+
+Each `WorkspaceCell` keeps a `documents` table listing the docs in its
+workspace. A document request is handled in two steps:
+
+1. The router forwards the request to the `DocCell`, exactly as in Phase 1.
+2. If the response is `200` or `201`, the router registers the doc in the
+   `WorkspaceCell` (internal path `PUT /docs/<docId>`, with the doc's
+   `createdAt`). Registration is idempotent.
+
+Writing the `DocCell` first means a document is never listed before it
+exists. The two cells cannot share a transaction, so a crash or error between
+the steps can leave a saved doc unlisted. The router reports that as `502
+catalogue_registration_failed`, and the next successful read or write of the
+doc registers it. The same rule adds Phase 1 documents to the catalogue the
+first time they are read or saved, without migrating or resetting any data.
+
+Clients can only list the catalogue (`GET /api/workspaces/:id/docs`). The
+router does not forward any client request to the registration path.
+
 Non-API paths never reach the Worker code: the static-asset layer serves the
 React app (`assets.run_worker_first: ["/api/*"]`).
 
@@ -74,6 +94,7 @@ cell_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
 
 -- WorkspaceCell
 workspace (id INTEGER PRIMARY KEY CHECK (id = 1), display_name, created_at, updated_at)
+documents (doc_id TEXT PRIMARY KEY, created_at)
 
 -- DocCell
 doc (id INTEGER PRIMARY KEY CHECK (id = 1), title, body, revision, created_at, updated_at)
@@ -108,9 +129,9 @@ How this is verified:
 
 ## Boundaries for later phases
 
-- **Phase 2 (catalogue):** `WorkspaceCell` will gain a `documents` table and
-  become the authority on which docs exist. The router will check it before
-  routing to a `DocCell`.
+- **Phase 2 (lifecycle):** the catalogue lists docs but does not yet gate
+  access to them; reads still go straight to the `DocCell`. Deleting and
+  renaming documents are not implemented yet.
 - **Phase 3 (collaboration):** `DocCell` will accept WebSocket connections and
   store Yjs updates. One cell per document is the natural single coordinator
   for collaboration.

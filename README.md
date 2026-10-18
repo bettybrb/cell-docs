@@ -10,8 +10,9 @@ with its own private SQLite database.
 - Everything runs locally in [workerd](https://github.com/cloudflare/workerd),
   the open-source Workers runtime. No Cloudflare account is needed.
 
-**Status:** Phase 1 (foundation) is done. Collaborative editing, the document
-catalogue and the other phases are planned; see [Roadmap](#roadmap).
+**Status:** Phase 1 (foundation) is done. Phase 2 is in progress: the document
+catalogue works; the rest of the document lifecycle and later phases are
+planned; see [Roadmap](#roadmap).
 Design notes are in [docs/architecture.md](docs/architecture.md).
 
 ## Requirements
@@ -50,10 +51,19 @@ Delete that folder to start from an empty state.
 |---|---|---|
 | `GET` | `/api/health` | none (answered by the router) |
 | `GET` / `PUT` | `/api/workspaces/:workspaceId` | `WorkspaceCell` named `workspace:<workspaceId>` |
-| `GET` / `PUT` | `/api/workspaces/:workspaceId/docs/:docId` | `DocCell` named `doc:<workspaceId>/<docId>` |
+| `GET` | `/api/workspaces/:workspaceId/docs` | `WorkspaceCell` (the document catalogue) |
+| `GET` / `PUT` | `/api/workspaces/:workspaceId/docs/:docId` | `DocCell` named `doc:<workspaceId>/<docId>`, then `WorkspaceCell` to register it |
 
 Ids use lowercase letters, digits and dashes (1–63 characters).
-`GET` returns `404` until the resource has been written once.
+`GET` returns `404` until the resource has been written once. The document
+list is empty (not `404`) for a workspace with no documents, and workspaces do
+not need to be created before adding documents.
+
+Every successful document read or write also registers the document in the
+catalogue. If that registration fails, the document is still saved and the
+response is `502` with code `catalogue_registration_failed`; retrying the
+request is safe. Documents saved before the catalogue existed appear in the
+list after they are read or saved once.
 Every response includes a `cell` object with the cell's name, Durable Object
 id and SQLite size, so you can see which cell answered.
 
@@ -66,7 +76,8 @@ curl localhost:5180/api/workspaces/demo/docs/intro
 ## Verifying it yourself
 
 1. **Backend:** `curl localhost:5180/api/health`
-2. **Frontend:** open http://localhost:5180, check that it shows "Backend OK", then save and load a doc.
+2. **Frontend:** open http://localhost:5180, check that it shows "Backend OK", then save a doc and
+   select it from the document list.
 3. **Cells:** `npm run demo`. Every line should say `PASS`, and the table shows a
    different cell id per resource.
 4. **SQLite persistence:** save a doc, stop and restart `npm run dev`, then load
@@ -91,7 +102,7 @@ wrangler.jsonc                 bindings and SQLite migrations
 ## Roadmap
 
 1. Foundation: router, cells, per-cell SQLite, tests ✅
-2. Resource catalogue and document lifecycle
+2. Resource catalogue ✅ and document lifecycle
 3. Collaborative Markdown editing (Yjs, CodeMirror 6, WebSockets) and presence
 4. Autosave, reconnect and recovery
 5. Compatibility testing with the open-source celld runtime
