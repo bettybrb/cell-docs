@@ -79,7 +79,34 @@ with connections open and rebuild its `Y.Doc` from SQLite on the next
 message. Above 100 stored updates, loading merges them into one row.
 
 Only existing documents can be opened (`404` otherwise); documents are still
-created with `PUT`. Presence messages from the client are ignored for now.
+created with `PUT`.
+
+## Presence and reconnection
+
+**Presence** uses Yjs *awareness*, the second message type on the same
+socket. Each browser shares a small state (a guest name and colour, plus its
+cursor). `DocCell` forwards awareness messages to the other connections and
+keeps each socket's latest state in the socket's attachment, which survives
+hibernation. With that it can:
+
+- send a newcomer everyone already connected;
+- announce a leave when a socket closes, even without a goodbye (tab killed,
+  network lost, server restart), by sending that client's state as `null` at
+  its last clock. Browsers also drop anyone they have not heard from for 30
+  seconds, as a fallback.
+
+Each awareness state has a clock, and an update with a clock that is not
+newer is ignored. A browser that was announced as gone therefore re-sends its
+state with a higher clock every time it connects; otherwise the others would
+not see it again until its next periodic renewal (up to 30 seconds).
+
+**Reconnection** needs no extra server logic. `y-websocket` retries with a
+growing delay (at most 2.5 s). The editor stays editable offline: edits go
+into the browser's `Y.Doc`. On reconnect the normal first exchange (each side
+sends what it has, the other answers with what is missing) delivers those
+edits to `DocCell`, and anything others wrote meanwhile to the browser. Yjs
+merges both without losing either. After a backend restart the same happens,
+with `DocCell` first rebuilding its `Y.Doc` from SQLite.
 
 ## Document catalogue
 
@@ -165,8 +192,8 @@ How this is verified:
 - **Phase 2 (lifecycle):** the catalogue lists docs but does not yet gate
   access to them; reads still go straight to the `DocCell`. Deleting and
   renaming documents are not implemented yet.
-- **Phase 3 (collaboration):** live sync is in place (see above). Presence
-  (who is editing, remote cursors) is next.
+- **Phase 3 (collaboration):** done: live sync, presence and reconnection
+  (see above). Phase 4 adds autosave and recovery on top.
 - **Phase 5 (celld):** cells talk to the router only through `fetch()`, a
   small and portable interface, which should make running them on another
   runtime easier.

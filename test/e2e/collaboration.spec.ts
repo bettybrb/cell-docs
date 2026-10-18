@@ -1,0 +1,201 @@
+import { expect, test, type Browser, type BrowserContext, type Page, type WebSocketRoute } from "@playwright/test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { DocState } from "../../src/shared/api-types";
+import { dummyDocId, dummyWorkspaceId } from "../../src/shared/dummy-data";
+import { request, startDevServer, type DevServer } from "../integration/dev-server";
+
+/**
+ * Two independent browser contexts (separate "browsers": no shared storage
+ * or connections) editing the same document through the real dev server.
+ */
+
+const PORT = 5193;
+
+let stateDir: string;
+let server: DevServer;
+const contexts: BrowserContext[] = [];
+
+test.describe.configure({ mode: "serial" });
+
+test.beforeAll(async () => {
+  stateDir = await mkdtemp(join(tmpdir(), "cell-docs-lab-e2e-"));
+  server = await startDevServer({ port: PORT, stateDir });
+});
+
+test.afterEach(async () => {
+  await Promise.all(contexts.splice(0).map((context) => context.close()));
+});
+
+test.afterAll(async () => {
+  await server?.stop("SIGTERM");
+  await rm(stateDir, { recursive: true, force: true });
+});
+
+/** Creates a document through the REST API and returns its ids. */
+async function createDoc(body: string) {
+  const ws = dummyWorkspaceId();
+  const doc = dummyDocId();
+  const created = await request(server.baseUrl, "PUT", `/api/workspaces/${ws}/docs/${doc}`, { title: "Shared", body });
+  expect(created.status).toBe(201);
+  return { ws, doc };
+}
+
+/** Opens a new, independent browser context. */
+async function newBrowser(browser: Browser): Promise<Page> {
+  const context = await browser.newContext();
+  contexts.push(context);
+  return context.newPage();
+}
+
+/** Loads the app and opens the document; resolves once it is live-synced. */
+async function openDoc(page: Page, ids: { ws: string; doc: string }): Promise<void> {
+  await page.goto(server.baseUrl);
+  await page.getByLabel("Workspace id").fill(ids.ws);
+  await page.getByLabel("Doc id").fill(ids.doc);
+  await page.getByRole("button", { name: "Load doc" }).click();
+  await expect(status(page)).toHaveAttribute("data-status", "connected");
+  await expect(editor(page)).toBeVisible();
+}
+
+const editor = (page: Page) => page.locator(".cm-content");
+
+/** The document text in the editor, without other people's cursor labels. */
+const docText = (page: Page) =>
+  editor(page).evaluate((element) => {
+    const copy = element.cloneNode(true) as HTMLElement;
+    copy.querySelectorAll(".cm-ySelectionCaret").forEach((caret) => caret.remove());
+    return [...copy.querySelectorAll(".cm-line")]
+      .map((line) => line.textContent ?? "")
+      .join("\n")
+      .replace(/\u2060/g, ""); // word joiners CodeMirror puts around widgets
+  });
+
+/** Waits until the editor shows exactly `text`. */
+const expectText = (page: Page, text: string) => expect.poll(() => docText(page)).toBe(text);
+
+/** Waits until the editor's text contains `text`. */
+const expectContains = (page: Page, text: string) => expect.poll(() => docText(page)).toContain(text);
+const status = (page: Page) => page.getByTestId("connection-status");
+const collaboratorCount = (page: Page) => page.getByTestId("collaborator-count");
+
+/** Types at the end of the document, like a user would. */
+async function typeAtEnd(page: Page, text: string): Promise<void> {
+  await editor(page).click();
+  await page.keyboard.press("ControlOrMeta+End");
+  await page.keyboard.type(text);
+}
+
+test("edits in one browser appear in the other without saving", async ({ browser }) => {
+  const ids = await createDoc("Shared start.");
+  const [a, b] = [await newBrowser(browser), await newBrowser(browser)];
+  await openDoc(a, ids);
+  await openDoc(b, ids);
+  await expectText(b, "Shared start.");
+
+  await typeAtEnd(a, " Typed in A.");
+  await expectText(b, "Shared start. Typed in A.");
+
+  await typeAtEnd(b, " Typed in B.");
+  await expectText(a, "Shared start. Typed in A. Typed in B.");
+});
+
+test("presence shows collaborators joining and leaving", async ({ browser }) => {
+  const ids = await createDoc("Presence.");
+  const a = await newBrowser(browser);
+  await openDoc(a, ids);
+  await expect(collaboratorCount(a)).toHaveText("1");
+
+  const b = await newBrowser(browser);
+  await openDoc(b, ids);
+  await expect(collaboratorCount(a)).toHaveText("2");
+  await expect(collaboratorCount(b)).toHaveText("2");
+  await expect(a.getByTestId("collaborator").filter({ hasText: /^(, )?Guest-\d+$/ })).toHaveCount(1);
+
+  // B closes its browser: A sees it leave.
+  await b.context().close();
+  await expect(collaboratorCount(a)).toHaveText("1");
+
+  // Someone else joins: A sees them.
+  const c = await newBrowser(browser);
+  await openDoc(c, ids);
+  await expect(collaboratorCount(a)).toHaveText("2");
+});
+
+test("a browser that loses its connection reconnects and keeps every edit", async ({ browser }) => {
+  const ids = await createDoc("Start.");
+  const a = await newBrowser(browser);
+
+  // Route A's sync socket through Playwright so the test can cut it.
+  let blocked = false;
+  const routes: WebSocketRoute[] = [];
+  await a.routeWebSocket(/\/sync$/, (ws) => {
+    if (blocked) {
+      ws.close({ code: 1006, reason: "test: offline" });
+      return;
+    }
+    routes.push(ws, ws.connectToServer());
+  });
+
+  const goOffline = async () => {
+    blocked = true;
+    await Promise.all(routes.splice(0).map((route) => route.close({ code: 1006, reason: "test: offline" })));
+    await expect(status(a)).toHaveAttribute("data-status", "disconnected");
+  };
+
+  const b = await newBrowser(browser);
+  await openDoc(a, ids);
+  await openDoc(b, ids);
+  await expect(collaboratorCount(b)).toHaveText("2");
+
+  // A drops and comes back without touching anything: B sees it leave and return.
+  await goOffline();
+  await expect(collaboratorCount(b)).toHaveText("1");
+  blocked = false;
+  await expect(status(a)).toHaveAttribute("data-status", "connected");
+  await expect(collaboratorCount(b)).toHaveText("2", { timeout: 5_000 });
+
+  // Cut A off again and keep it off.
+  await goOffline();
+  await expect(collaboratorCount(b)).toHaveText("1");
+
+  // Both keep editing while A is offline.
+  await typeAtEnd(a, " A offline.");
+  await typeAtEnd(b, " B meanwhile.");
+  expect(await docText(b)).not.toContain("A offline.");
+
+  // A comes back: both edits are in both browsers, and A is present again.
+  blocked = false;
+  await expect(status(a)).toHaveAttribute("data-status", "connected");
+  await expectContains(b, "A offline.");
+  await expectContains(a, "B meanwhile.");
+  await expectText(a, await docText(b));
+  await expect(collaboratorCount(b)).toHaveText("2");
+});
+
+test("content survives a backend restart, including edits made during the outage", async ({ browser }) => {
+  const ids = await createDoc("Before restart.");
+  const [a, b] = [await newBrowser(browser), await newBrowser(browser)];
+  await openDoc(a, ids);
+  await openDoc(b, ids);
+  await typeAtEnd(a, " Live edit.");
+  await expectText(b, "Before restart. Live edit.");
+
+  await server.stop("SIGTERM");
+  await expect(status(a)).toHaveAttribute("data-status", "disconnected");
+  await typeAtEnd(a, " During outage.");
+
+  server = await startDevServer({ port: PORT, stateDir });
+  await expect(status(a)).toHaveAttribute("data-status", "connected");
+  await expect(status(b)).toHaveAttribute("data-status", "connected");
+  const expected = "Before restart. Live edit. During outage.";
+  await expectText(b, expected);
+
+  // A brand-new browser loads the same content from the restarted backend.
+  const c = await newBrowser(browser);
+  await openDoc(c, ids);
+  await expectText(c, expected);
+  const saved = await request<DocState>(server.baseUrl, "GET", `/api/workspaces/${ids.ws}/docs/${ids.doc}`);
+  expect(saved.data.body).toBe(expected);
+});

@@ -1,0 +1,11 @@
+// Playwright browser tests: run in Node, but parts of them (page.evaluate
+// callbacks) run inside the browser, so they need both Node and DOM types.
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "allowImportingTsExtensions": true
+  },
+  "include": ["playwright.config.ts", "test/e2e", "test/integration/dev-server.ts", "src/shared"]
+}

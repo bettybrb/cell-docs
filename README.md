@@ -41,7 +41,8 @@ Delete that folder to start from an empty state.
 | `npm run typecheck` | Generates Worker types, then type-checks the client, Worker and Node code |
 | `npm test` | Tests inside workerd (routing, addressing, isolation, eviction/restart) and client tests with happy-dom (editor ↔ Y.Text binding) |
 | `npm run test:integration` | Starts the real dev server: restart persistence (`SIGTERM` and `SIGKILL`) and live sync between two clients |
-| `npm run test:all` | Typecheck + both test suites |
+| `npm run test:e2e` | Playwright (Chromium) with two independent browsers: live sync, presence, reconnection, backend restart. First time: `npx playwright install chromium` |
+| `npm run test:all` | Typecheck + all test suites |
 | `npm run demo` | End-to-end demo with generated data against a running dev server |
 | `npm run build` | Production build into `dist/` (nothing is deployed) |
 
@@ -85,6 +86,11 @@ curl localhost:5180/api/workspaces/demo/docs/intro
    it again. Each cell's database is a separate file under
    `.wrangler/state/v3/do/cell-docs-lab-DocCell/<id>.sqlite`, and you can read
    it with `sqlite3 -readonly <file> "SELECT * FROM doc"`.
+5. **Collaboration:** open the same doc in two browser windows (or one normal
+   and one private window). Typing in one appears in the other; the line above
+   the editor shows "● Connected" and who is here. Stop `npm run dev`: both
+   show "Offline, reconnecting…" and stay editable. Start it again: both
+   reconnect and the edits made meanwhile appear in both.
 
 ## Project layout
 
@@ -105,7 +111,7 @@ wrangler.jsonc                 bindings and SQLite migrations
 
 1. Foundation: router, cells, per-cell SQLite, tests ✅
 2. Resource catalogue ✅ and document lifecycle
-3. Collaborative Markdown editing (Yjs, CodeMirror 6, WebSockets) and presence
+3. Collaborative Markdown editing (Yjs, CodeMirror 6, WebSockets) and presence ✅
 4. Autosave, reconnect and recovery
 5. Compatibility testing with the open-source celld runtime
 6. Documentation, CI and handover
@@ -120,7 +126,9 @@ wrangler.jsonc                 bindings and SQLite migrations
   counts saves, not live edits.
 - The body length limit (100,000 characters) is only checked on `PUT`, not on
   live edits.
-- No presence yet: you cannot see who else has the document open.
+- Collaborators are anonymous guests with random names (no accounts yet), and
+  edits made while offline exist only in that browser tab until it
+  reconnects: closing the tab while offline loses them.
 - Only verified locally. Nothing has been deployed to Cloudflare.
 - The client bundle is about 930 kB (about 310 kB gzipped), mostly CodeMirror,
   the language packages that `@codemirror/lang-markdown` pulls in, and Yjs, so
