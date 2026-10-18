@@ -1,0 +1,11 @@
+// Code that runs in Node.js: build/test configuration and the restart test.
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023"],
+    "types": ["node"],
+    // scripts/ run directly with Node's built-in TypeScript support, which needs .ts extensions.
+    "allowImportingTsExtensions": true
+  },
+  "include": ["vite.config.ts", "vitest.config.ts", "vitest.integration.config.ts", "test/integration", "scripts", "src/shared"]
+}

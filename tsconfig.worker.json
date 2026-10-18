@@ -1,0 +1,10 @@
+// Code that runs inside the Workers runtime (workerd): the Worker, its cells,
+// and the Vitest tests that execute inside workerd.
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2024"],
+    "types": ["@cloudflare/vitest-plugin/types"]
+  },
+  "include": ["src/worker", "src/shared", "test/worker"]
+}

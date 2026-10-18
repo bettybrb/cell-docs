@@ -1,0 +1,10 @@
+// Solution file for editors. Each sub-project is type-checked separately
+// because they run in different environments (browser, Workers runtime, Node).
+{
+  "files": [],
+  "references": [
+    { "path": "./tsconfig.app.json" },
+    { "path": "./tsconfig.worker.json" },
+    { "path": "./tsconfig.node.json" }
+  ]
+}
