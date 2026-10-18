@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import type { DocCatalogue, HealthResponse } from "../shared/api-types";
 import { api, type ApiResult } from "./api";
+import { MarkdownEditor } from "./MarkdownEditor";
 
 export function App() {
   return (
@@ -123,10 +124,10 @@ function CellExplorer() {
           Title
           <input value={title} onChange={(e) => setTitle(e.target.value)} />
         </label>
-        <label className="wide">
-          Body
-          <textarea rows={4} value={body} onChange={(e) => setBody(e.target.value)} />
-        </label>
+        <div className="wide">
+          Body (Markdown)
+          <MarkdownEditor value={body} onChange={setBody} />
+        </div>
         <div className="buttons">
           <button onClick={() => loadDoc(docId)}>Load doc</button>
           <button onClick={saveDoc}>Save doc</button>
