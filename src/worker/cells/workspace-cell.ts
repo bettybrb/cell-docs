@@ -1,10 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
-import type { DocCatalogue, WorkspaceState } from "../../shared/api-types";
+import { Schema } from "effect";
+import { UpdateWorkspaceRequest, type DocCatalogue, type WorkspaceState } from "../../shared/api-types";
 import { isValidId, parseCellName } from "../addressing";
-import { CELL_NAME_HEADER, errorResponse, json, readJsonObject } from "../http";
+import { CELL_NAME_HEADER, errorResponse, json, readBody } from "../http";
 import { cellInfo, claimCellName, createCellMetaTable, storedCellName } from "./cell-meta";
 
-const MAX_DISPLAY_NAME_LENGTH = 100;
+/** Body of the router's internal "register this document" call. */
+const RegisterDocRequest = Schema.Struct({ createdAt: Schema.NonEmptyString });
 
 interface WorkspaceRow {
   display_name: string;
@@ -90,12 +92,9 @@ export class WorkspaceCell extends DurableObject<Env> {
    * left unchanged, so retries and re-registrations are harmless.
    */
   private async registerDoc(request: Request, name: string, docId: string): Promise<Response> {
-    const body = await readJsonObject(request);
+    const body = await readBody(request, RegisterDocRequest);
     if (body instanceof Response) return body;
     const { createdAt } = body;
-    if (typeof createdAt !== "string" || createdAt === "") {
-      return errorResponse(400, "invalid_body", "createdAt must be a non-empty string.");
-    }
 
     const exists = this.sql.exec(`SELECT 1 FROM documents WHERE doc_id = ?`, docId).toArray().length > 0;
     if (exists) return new Response(null, { status: 204 });
@@ -116,20 +115,9 @@ export class WorkspaceCell extends DurableObject<Env> {
   }
 
   private async write(request: Request, name: string, workspaceId: string): Promise<Response> {
-    const body = await readJsonObject(request);
+    const body = await readBody(request, UpdateWorkspaceRequest);
     if (body instanceof Response) return body;
     const { displayName } = body;
-    if (
-      typeof displayName !== "string" ||
-      displayName.trim() === "" ||
-      displayName.length > MAX_DISPLAY_NAME_LENGTH
-    ) {
-      return errorResponse(
-        400,
-        "invalid_body",
-        `displayName must be a non-empty string of at most ${MAX_DISPLAY_NAME_LENGTH} characters.`,
-      );
-    }
 
     const now = new Date().toISOString();
     const existed = this.loadRow() !== undefined;

@@ -1,8 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
 import * as Y from "yjs";
-import type { DocState, UpdateDocRequest } from "../../shared/api-types";
+import { UpdateDocRequest, type DocState } from "../../shared/api-types";
 import { parseCellName } from "../addressing";
-import { CELL_NAME_HEADER, errorResponse, json, readJsonObject } from "../http";
+import { CELL_NAME_HEADER, errorResponse, json, readBody } from "../http";
 import { cellInfo, claimCellName, createCellMetaTable, storedCellName } from "./cell-meta";
 import {
   awarenessMessage,
@@ -15,8 +15,6 @@ import {
   type PresenceEntry,
 } from "./yjs-sync";
 
-const MAX_TITLE_LENGTH = 200;
-const MAX_BODY_LENGTH = 100_000;
 /** Above this many stored updates, loading merges them into one row. */
 const COMPACT_AFTER_UPDATES = 100;
 
@@ -110,10 +108,8 @@ export class DocCell extends DurableObject<Env> {
     workspaceId: string,
     docId: string,
   ): Promise<Response> {
-    const body = await readJsonObject(request);
-    if (body instanceof Response) return body;
-    const update = validateUpdate(body);
-    if (typeof update === "string") return errorResponse(400, "invalid_body", update);
+    const update = await readBody(request, UpdateDocRequest);
+    if (update instanceof Response) return update;
 
     const now = new Date().toISOString();
     const existing = this.loadRow();
@@ -289,18 +285,6 @@ export class DocCell extends DurableObject<Env> {
       updatedAt: row.updated_at,
     };
   }
-}
-
-function validateUpdate(input: Record<string, unknown>): UpdateDocRequest | string {
-  const { title, body } = input;
-  if (title === undefined && body === undefined) return "Provide at least one of: title, body.";
-  if (title !== undefined && (typeof title !== "string" || title.length > MAX_TITLE_LENGTH)) {
-    return `title must be a string of at most ${MAX_TITLE_LENGTH} characters.`;
-  }
-  if (body !== undefined && (typeof body !== "string" || body.length > MAX_BODY_LENGTH)) {
-    return `body must be a string of at most ${MAX_BODY_LENGTH} characters.`;
-  }
-  return { title, body } as UpdateDocRequest;
 }
 
 function presenceEntries(ws: WebSocket): PresenceEntry[] {

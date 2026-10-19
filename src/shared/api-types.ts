@@ -1,3 +1,5 @@
+import { Schema } from "effect";
+
 /**
  * JSON shapes exchanged between the browser and the Worker.
  * Imported by both the React client and the Worker so they cannot drift apart.
@@ -44,14 +46,34 @@ export interface DocCatalogue {
   docs: { docId: string; createdAt: string }[];
 }
 
-export interface UpdateWorkspaceRequest {
-  displayName: string;
-}
+/*
+ * Request bodies are Effect schemas: one definition gives the TypeScript type
+ * (used by the client) and the validation (used by the cells). The client
+ * imports only the types, so Effect is not part of the browser bundle.
+ */
 
-export interface UpdateDocRequest {
-  title?: string;
-  body?: string;
-}
+export const MAX_DISPLAY_NAME_LENGTH = 100;
+export const MAX_TITLE_LENGTH = 200;
+export const MAX_BODY_LENGTH = 100_000;
+
+export const UpdateWorkspaceRequest = Schema.Struct({
+  displayName: Schema.String.check(
+    Schema.isMaxLength(MAX_DISPLAY_NAME_LENGTH),
+    Schema.makeFilter((name: string) => name.trim() !== "", { message: "displayName must not be blank." }),
+  ),
+});
+export type UpdateWorkspaceRequest = typeof UpdateWorkspaceRequest.Type;
+
+/** Either field may be left out, but not both. */
+export const UpdateDocRequest = Schema.Struct({
+  title: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(MAX_TITLE_LENGTH))),
+  body: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(MAX_BODY_LENGTH))),
+}).check(
+  Schema.makeFilter((update) => update.title !== undefined || update.body !== undefined, {
+    message: "Provide at least one of: title, body.",
+  }),
+);
+export type UpdateDocRequest = typeof UpdateDocRequest.Type;
 
 export interface HealthResponse {
   ok: true;
