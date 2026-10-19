@@ -13,9 +13,11 @@
  * Non-API paths are served by the static-asset layer (the React app) and
  * normally never reach this code; see `assets` in wrangler.jsonc.
  */
+import { Effect } from "effect";
 import type { DocState, HealthResponse } from "../shared/api-types";
 import { docCellName, isValidId, workspaceCellName } from "./addressing";
 import { CELL_NAME_HEADER, errorResponse, json } from "./http";
+import { registerInCatalogue } from "./register-doc";
 
 export { DocCell } from "./cells/doc-cell";
 export { WorkspaceCell } from "./cells/workspace-cell";
@@ -89,38 +91,42 @@ export default {
  * idempotent, which means:
  *   - documents created before the catalogue existed (Phase 1) are added the
  *     first time they are read or saved;
- *   - if registration fails, the document is already saved, and retrying the
- *     GET or PUT registers it.
+ *   - registration is retried briefly on temporary failures (register-doc.ts);
+ *   - if it still fails, the document is already saved, and retrying the GET
+ *     or PUT registers it.
+ *
+ * The DocCell call itself is neither retried nor timed out: a PUT raises the
+ * revision, so repeating it could apply a save twice.
  */
-async function routeDoc(env: Env, workspaceId: string, docId: string, request: Request): Promise<Response> {
-  const response = await forwardToCell(env.DOC_CELL, docCellName(workspaceId, docId), request);
-  if (response.status !== 200 && response.status !== 201) return response;
+function routeDoc(env: Env, workspaceId: string, docId: string, request: Request): Promise<Response> {
+  const program = Effect.gen(function* () {
+    const response = yield* Effect.promise(() => forwardToCell(env.DOC_CELL, docCellName(workspaceId, docId), request));
+    if (response.status !== 200 && response.status !== 201) return response;
 
-  const doc = (await response.clone().json()) as DocState;
-  const failure = await registerDoc(env, workspaceId, docId, doc.createdAt);
-  if (failure) {
-    return errorResponse(
-      502,
-      "catalogue_registration_failed",
-      `Document ${docId} is stored (revision ${doc.revision}), but adding it to the workspace catalogue failed ` +
-        `(${failure}). Retry the request: registration is safe to repeat.`,
+    const doc = yield* Effect.promise(() => response.clone().json() as Promise<DocState>);
+    return yield* registerInCatalogue(() =>
+      callCell(env.WORKSPACE_CELL, workspaceCellName(workspaceId), `/docs/${docId}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ createdAt: doc.createdAt }),
+      }),
+    ).pipe(
+      Effect.as(response),
+      Effect.catchTag("RegistrationFailed", (failure) =>
+        Effect.succeed(
+          errorResponse(
+            502,
+            "catalogue_registration_failed",
+            `Document ${docId} is stored (revision ${doc.revision}), but adding it to the workspace catalogue ` +
+              `failed (${failure.reason}). Retry the request: registration is safe to repeat.`,
+          ),
+        ),
+      ),
     );
-  }
-  return response;
-}
-
-/** Registers a doc in its workspace catalogue. Returns a failure reason, or null on success. */
-async function registerDoc(env: Env, workspaceId: string, docId: string, createdAt: string): Promise<string | null> {
-  try {
-    const response = await callCell(env.WORKSPACE_CELL, workspaceCellName(workspaceId), `/docs/${docId}`, {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ createdAt }),
-    });
-    return response.ok ? null : `workspace cell answered ${response.status}`;
-  } catch (error) {
-    return error instanceof Error ? error.message : String(error);
-  }
+  });
+  // Every typed failure is handled above, so this only rejects on an unexpected
+  // exception (for example the DocCell call throwing), as before.
+  return Effect.runPromise(program);
 }
 
 /**
