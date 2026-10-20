@@ -45,7 +45,15 @@ export interface ConnectedDocSession extends DocSession {
   status(): ConnectionStatus;
   /** Edits made in this browser that the server has not yet confirmed as saved. */
   unsavedChanges(): number;
-  /** Calls `listener` whenever status() or unsavedChanges() changes; returns an unsubscribe function. */
+  /** True while offline was switched on with setOffline (for demos and testing). */
+  offline(): boolean;
+  /**
+   * Drops the connection and stops reconnecting (true), or reconnects (false).
+   * Behaves like a real network loss: others see this browser leave, and
+   * edits wait until it is back online.
+   */
+  setOffline(offline: boolean): void;
+  /** Calls `listener` whenever status(), unsavedChanges() or offline() changes; returns an unsubscribe function. */
   subscribe(listener: () => void): () => void;
   /** Closes the connection. Call before switching documents. */
   destroy(): void;
@@ -84,6 +92,7 @@ export function connectDocSession(
   awareness.setLocalStateField("user", user);
 
   let status: ConnectionStatus = "connecting";
+  let offline = false;
   const listeners = new Set<() => void>();
   const notify = () => listeners.forEach((listener) => listener());
 
@@ -133,6 +142,13 @@ export function connectDocSession(
     synced,
     status: () => status,
     unsavedChanges: () => editCount - confirmedCount,
+    offline: () => offline,
+    setOffline(value) {
+      offline = value;
+      if (value) provider.disconnect();
+      else provider.connect();
+      notify();
+    },
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);

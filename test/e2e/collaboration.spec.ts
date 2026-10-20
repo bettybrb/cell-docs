@@ -215,6 +215,34 @@ test("shows whether edits are saved and warns before closing with unsaved edits"
   expect(await body()).toBe("Start. One. Two.");
 });
 
+test("the Go offline toggle simulates a lost connection for demos", async ({ browser }) => {
+  const ids = await createDoc("Demo.");
+  const [a, b] = [await newBrowser(browser), await newBrowser(browser)];
+  await openDoc(a, ids);
+  await openDoc(b, ids);
+  await expect(collaboratorCount(b)).toHaveText("2");
+
+  await a.getByTestId("offline-toggle").click();
+  await expect(status(a)).toHaveText("○ Offline (simulated)");
+  await expect(collaboratorCount(b)).toHaveText("1");
+  await typeAtEnd(a, " Written offline.");
+  await expect(saveStatus(a)).toHaveAttribute("data-state", "unsaved");
+  expect(await docText(b)).toBe("Demo.");
+
+  // Closing the tab now asks first; stay on the page.
+  const dialog = a.waitForEvent("dialog");
+  await a.close({ runBeforeUnload: true });
+  const warning = await dialog;
+  expect(warning.type()).toBe("beforeunload");
+  await warning.dismiss();
+
+  await a.getByTestId("offline-toggle").click(); // "Go back online"
+  await expect(status(a)).toHaveAttribute("data-status", "connected");
+  await expect(saveStatus(a)).toHaveAttribute("data-state", "saved");
+  await expectText(b, "Demo. Written offline.");
+  await expect(collaboratorCount(b)).toHaveText("2");
+});
+
 test("refreshing the page reopens the same document with its latest content", async ({ browser }) => {
   const ids = await createDoc("Saved.");
   const page = await newBrowser(browser);

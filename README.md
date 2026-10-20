@@ -89,10 +89,12 @@ curl localhost:5180/api/workspaces/demo/docs/intro
 5. **Collaboration:** open the same doc in two browser windows (or one normal
    and one private window). Typing in one appears in the other; the line above
    the editor shows "● Connected", whether your edits are saved, and who is
-   here. Stop `npm run dev`: both show "Offline, reconnecting…" and "Not
-   saved yet", stay editable, and ask before you close the tab. Start it
-   again: both reconnect, edits made meanwhile appear in both, and the status
-   returns to "All changes saved".
+   here. Click **Go offline** in one window: it shows "Offline (simulated)"
+   and "Not saved yet", stays editable, asks before you close the tab, and
+   the other window sees it leave. Click **Go back online**: the edits made
+   meanwhile appear in both and the status returns to "All changes saved".
+   Stopping `npm run dev` (press `q` then Enter in its terminal) and starting
+   it again does the same for both windows at once.
 
 ## Project layout
 

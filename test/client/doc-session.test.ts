@@ -127,6 +127,28 @@ describe("saved acknowledgements", () => {
     session.destroy();
   });
 
+  it("goes offline on request, stays offline, and reconnects when switched back", () => {
+    vi.useFakeTimers();
+    const session = connectDocSession("ws://host/api/workspaces/acme/docs", "intro", options);
+    const first = FakeWebSocket.instances.at(-1)!;
+    first.connectAndSync();
+
+    session.setOffline(true);
+    expect(first.closed).toBe(true);
+    expect(session.offline()).toBe(true);
+    expect(session.status()).toBe("disconnected");
+    vi.advanceTimersByTime(10_000);
+    expect(FakeWebSocket.instances.at(-1)).toBe(first); // no reconnect attempts
+
+    session.text.insert(0, "offline edit");
+    session.setOffline(false);
+    const second = FakeWebSocket.instances.at(-1)!;
+    expect(second).not.toBe(first);
+    second.connectAndSync();
+    expect(second.saveChecksSent()).toEqual([1]);
+    session.destroy();
+  });
+
   it("does not count changes that came from the server", () => {
     const session = connectDocSession("ws://host/api/workspaces/acme/docs", "intro", options);
     const socket = FakeWebSocket.instances.at(-1)!;

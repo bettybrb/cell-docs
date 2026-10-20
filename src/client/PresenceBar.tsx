@@ -20,6 +20,7 @@ const SAVE_TEXT: Record<SaveState, string> = {
 export function PresenceBar({ session }: { session: ConnectedDocSession }) {
   const [status, setStatus] = useState(session.status());
   const [unsaved, setUnsaved] = useState(session.unsavedChanges());
+  const [offline, setOffline] = useState(session.offline());
   const [people, setPeople] = useState(() => collaborators(session.awareness));
 
   useEffect(() => {
@@ -27,6 +28,7 @@ export function PresenceBar({ session }: { session: ConnectedDocSession }) {
     const updateStatus = () => {
       setStatus(session.status());
       setUnsaved(session.unsavedChanges());
+      setOffline(session.offline());
     };
     session.awareness.on("change", updatePeople);
     const stop = session.subscribe(updateStatus);
@@ -43,7 +45,7 @@ export function PresenceBar({ session }: { session: ConnectedDocSession }) {
   return (
     <p className="presence" data-testid="presence">
       <span data-testid="connection-status" data-status={status}>
-        {STATUS_TEXT[status]}
+        {offline ? "○ Offline (simulated)" : STATUS_TEXT[status]}
       </span>
       {" · "}
       <span data-testid="save-status" data-state={saveState}>
@@ -57,7 +59,11 @@ export function PresenceBar({ session }: { session: ConnectedDocSession }) {
           <span className="dot" style={{ background: person.color }} />
           {person.self ? `You (${person.name})` : person.name}
         </span>
-      ))}
+      ))}{" "}
+      {/* For demos: drop the connection without stopping the server. */}
+      <button data-testid="offline-toggle" onClick={() => session.setOffline(!offline)}>
+        {offline ? "Go back online" : "Go offline"}
+      </button>
     </p>
   );
 }

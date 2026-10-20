@@ -109,7 +109,10 @@ function CellExplorer() {
   useEffect(() => {
     if (!live) return;
     const warn = (event: BeforeUnloadEvent) => {
-      if (live.unsavedChanges() > 0) event.preventDefault();
+      if (live.unsavedChanges() === 0) return;
+      event.preventDefault();
+      // Older browsers only show the prompt when returnValue is set.
+      event.returnValue = "";
     };
     addEventListener("beforeunload", warn);
     return () => removeEventListener("beforeunload", warn);
