@@ -230,6 +230,22 @@ How this is verified:
   with `SIGTERM`, and as a simulated crash with `SIGKILL`), restarts it on the
   same state directory, and reads the data back. As a control, the test fails
   when persistence is turned off.
+- `test/e2e/collaboration.spec.ts` kills the server with `SIGKILL` while a
+  browser is editing: everything shown as "All changes saved" is still there
+  after the restart, and edits typed just before the crash are resent.
+
+## Failure modes at a glance
+
+| What goes wrong | What happens | Covered by |
+|---|---|---|
+| Network drops (one browser) | Editor stays editable, status shows offline; reconnects on its own and exchanges missing edits both ways | e2e: lost connection, Go offline toggle |
+| Tab closed or browser crashes while offline | Edits are in IndexedDB; synced the next time the doc is opened | e2e: offline edits survive closing the tab |
+| Server stopped or killed (`SIGTERM`/`SIGKILL`) | Acknowledged edits are durable; unacknowledged ones are resent after reconnect | integration: restart; e2e: restart, crash mid-editing |
+| A cell is evicted from memory | Rebuilt from SQLite on the next request or message | worker: eviction tests |
+| A stored Yjs update is unreadable or missing | Unreadable rows are quarantined; the text is repaired from `doc.body` | worker: recovery tests |
+| Someone deletes or breaks content | Restore any of the last 50 versions; a restore can be undone | worker: versions; e2e: restore |
+| Catalogue registration fails | Retried briefly; otherwise `502`, and the next read or save registers it | worker: registration policy, catalogue |
+| Title save fails | Retried every 3 s on network errors and 5xx; a rejected title shows the reason | e2e: title retries |
 
 ## Local development stack
 
@@ -244,8 +260,14 @@ How this is verified:
 - **Phase 2 (lifecycle):** the catalogue lists docs but does not yet gate
   access to them; reads still go straight to the `DocCell`. Deleting and
   renaming documents are not implemented yet.
-- **Phase 3 (collaboration):** done: live sync, presence and reconnection
-  (see above). Phase 4 adds autosave and recovery on top.
+- **Phase 3 (collaboration):** done: live sync, presence and reconnection.
+- **Phase 4 (autosave and recovery):** done: saved acknowledgements, local
+  IndexedDB copies, title autosave, log merging, damaged-storage repair and
+  version history (see above and "Failure modes at a glance"). Not covered:
+  Cloudflare's point-in-time recovery for Durable Objects
+  (`ctx.storage.getBookmarkForTime`), which can roll a whole cell back to any
+  moment in the last 30 days but only exists on Cloudflare, not in local
+  workerd, so it could not be tested here.
 - **Phase 5 (celld):** cells talk to the router only through `fetch()`, a
   small and portable interface, which should make running them on another
   runtime easier.

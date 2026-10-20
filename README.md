@@ -10,9 +10,10 @@ with its own private SQLite database.
 - Everything runs locally in [workerd](https://github.com/cloudflare/workerd),
   the open-source Workers runtime. No Cloudflare account is needed.
 
-**Status:** Phase 1 (foundation) is done. Phase 2 is in progress: the document
-catalogue works; the rest of the document lifecycle and later phases are
-planned; see [Roadmap](#roadmap).
+**Status:** Phases 1, 3 and 4 are done: cells with per-cell SQLite, live
+collaborative Markdown editing with presence, and autosave, reconnect and
+recovery. From Phase 2 the document catalogue is done; deleting and renaming
+documents are not. See [Roadmap](#roadmap).
 Design notes are in [docs/architecture.md](docs/architecture.md).
 
 ## Requirements
@@ -97,18 +98,29 @@ curl localhost:5180/api/workspaces/demo/docs/intro
    meanwhile appear in both and the status returns to "All changes saved".
    Stopping `npm run dev` (press `q` then Enter in its terminal) and starting
    it again does the same for both windows at once.
+6. **Recovery:**
+   - *Offline edits survive closing the tab:* click **Go offline**, type,
+     close the tab (choose **Leave**), open the doc again: the text is back
+     and the status goes from "Saving…" to "All changes saved".
+   - *Undo a bad edit:* click **Save doc**, delete most of the text, open
+     **Versions** and click **Restore** on the "Saved" entry. Every open
+     window gets the text back; the "Before a restore" entry undoes it.
+   - *Title autosave:* change the title; within a second it says "Saved"
+     and the document list shows the new title.
 
 ## Project layout
 
 ```
 src/worker/index.ts            stateless router (Worker entry point)
+src/worker/register-doc.ts     catalogue registration: typed errors, retry, timeout (Effect)
 src/worker/addressing.ts       resource → cell name rules
-src/worker/cells/              WorkspaceCell, DocCell, shared cell bookkeeping
-src/shared/                    API types and dummy-data generator
-src/client/                    React page
+src/worker/cells/              WorkspaceCell, DocCell, Yjs sync protocol, cell bookkeeping
+src/shared/                    API types and schemas, save-check message, dummy data
+src/client/                    React page: editor, live session, presence, versions
 test/worker/                   tests that run inside workerd
 test/client/                   frontend tests (happy-dom)
-test/integration/              restart test against the real dev server
+test/integration/              restart and live-sync tests against the real dev server
+test/e2e/                      Playwright tests with two browsers (sync, presence, recovery)
 scripts/demo.ts                command-line demo
 wrangler.jsonc                 bindings and SQLite migrations
 ```
@@ -118,7 +130,7 @@ wrangler.jsonc                 bindings and SQLite migrations
 1. Foundation: router, cells, per-cell SQLite, tests ✅
 2. Resource catalogue ✅ and document lifecycle
 3. Collaborative Markdown editing (Yjs, CodeMirror 6, WebSockets) and presence ✅
-4. Autosave, reconnect and recovery
+4. Autosave, reconnect and recovery ✅
 5. Compatibility testing with the open-source celld runtime
 6. Documentation, CI and handover
 

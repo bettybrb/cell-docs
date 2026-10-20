@@ -423,6 +423,36 @@ test("the start page opens the saved sample document, not a stale draft", async 
   await expect(page.getByLabel("Title")).toHaveValue("Welcome (edited)");
 });
 
+test("a backend crash (SIGKILL) mid-editing loses nothing: saved edits stay saved, in-flight edits are resent", async ({
+  browser,
+}) => {
+  const ids = await createDoc("Start.");
+  const a = await newBrowser(browser);
+  await openDoc(a, ids);
+
+  // Confirmed by the server ("All changes saved") before the crash.
+  await typeAtEnd(a, " Acknowledged.");
+  await expect(saveStatus(a)).toHaveAttribute("data-state", "saving");
+  await expect(saveStatus(a)).toHaveAttribute("data-state", "saved");
+
+  // Typed and killed at once: these may or may not have reached the server.
+  await typeAtEnd(a, " In flight.");
+  await server.stop("SIGKILL");
+  await expect(status(a)).toHaveAttribute("data-status", "disconnected");
+
+  server = await startDevServer({ port: PORT, stateDir });
+  await expect(status(a)).toHaveAttribute("data-status", "connected");
+  await expect(saveStatus(a)).toHaveAttribute("data-state", "saved");
+
+  const expected = "Start. Acknowledged. In flight.";
+  await expectText(a, expected);
+  const saved = await request<DocState>(server.baseUrl, "GET", `/api/workspaces/${ids.ws}/docs/${ids.doc}`);
+  expect(saved.data.body).toBe(expected);
+  const fresh = await newBrowser(browser);
+  await openDoc(fresh, ids);
+  await expectText(fresh, expected);
+});
+
 test("content survives a backend restart, including edits made during the outage", async ({ browser }) => {
   const ids = await createDoc("Before restart.");
   const [a, b] = [await newBrowser(browser), await newBrowser(browser)];
