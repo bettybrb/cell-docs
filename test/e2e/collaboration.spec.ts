@@ -201,7 +201,7 @@ test("shows whether edits are saved and warns before closing with unsaved edits"
   await expect(status(page)).toHaveAttribute("data-status", "disconnected");
   await typeAtEnd(page, " Two.");
   await expect(saveStatus(page)).toHaveAttribute("data-state", "unsaved");
-  await expect(saveStatus(page)).toHaveText("Not saved yet, will sync when back online");
+  await expect(saveStatus(page)).toHaveText("Not on the server yet, kept on this device until back online");
 
   const dialog = page.waitForEvent("dialog");
   await page.close({ runBeforeUnload: true });
@@ -241,6 +241,66 @@ test("the Go offline toggle simulates a lost connection for demos", async ({ bro
   await expect(saveStatus(a)).toHaveAttribute("data-state", "saved");
   await expectText(b, "Demo. Written offline.");
   await expect(collaboratorCount(b)).toHaveText("2");
+});
+
+/** True once the browser's local copy (IndexedDB) of the document contains `marker`. */
+const savedLocally = (page: Page, database: string, marker: string) =>
+  page.evaluate(
+    ({ database, marker }) =>
+      new Promise<boolean>((resolve) => {
+        const open = indexedDB.open(database);
+        open.onsuccess = () => {
+          const read = open.result.transaction("updates").objectStore("updates").getAll();
+          read.onsuccess = () => {
+            const bytes = new TextEncoder().encode(marker);
+            const contains = (data: Uint8Array) =>
+              data.some((_, i) => bytes.every((byte, j) => data[i + j] === byte));
+            resolve((read.result as Uint8Array[]).some(contains));
+            open.result.close();
+          };
+        };
+        open.onerror = () => resolve(false);
+      }),
+    { database, marker },
+  );
+
+test("edits made offline survive closing the tab and sync when it is reopened", async ({ browser }) => {
+  const ids = await createDoc("Before.");
+  const { data: created } = await request<DocState>(server.baseUrl, "GET", `/api/workspaces/${ids.ws}/docs/${ids.doc}`);
+  const database = `cell-docs-lab:${ids.ws}/${ids.doc}@${created.createdAt}`;
+
+  const a = await newBrowser(browser);
+  await openDoc(a, ids);
+  await a.getByTestId("offline-toggle").click();
+  // Inserted in one go (like a paste), so the text is one stored update that
+  // savedLocally can find; typing would store one update per character.
+  await editor(a).click();
+  await a.keyboard.press("ControlOrMeta+End");
+  await a.keyboard.insertText(" Written offline.");
+  await expect(saveStatus(a)).toHaveAttribute("data-state", "unsaved");
+  expect(await a.evaluate(async () => (await indexedDB.databases()).map((db) => db.name))).toContain(database);
+  await expect.poll(() => savedLocally(a, database, "Written offline.")).toBe(true);
+
+  // Close the tab while offline (skipping the "Leave site?" question).
+  const context = a.context();
+  await a.close();
+  expect((await request<DocState>(server.baseUrl, "GET", `/api/workspaces/${ids.ws}/docs/${ids.doc}`)).data.body).toBe(
+    "Before.",
+  );
+
+  // Reopen in the same browser: the offline edit is back and reaches the server.
+  const reopened = await context.newPage();
+  await openDoc(reopened, ids);
+  await expectText(reopened, "Before. Written offline.");
+  await expect(saveStatus(reopened)).toHaveAttribute("data-state", "saved");
+  expect((await request<DocState>(server.baseUrl, "GET", `/api/workspaces/${ids.ws}/docs/${ids.doc}`)).data.body).toBe(
+    "Before. Written offline.",
+  );
+
+  // Another browser sees it too, and the text is not duplicated.
+  const b = await newBrowser(browser);
+  await openDoc(b, ids);
+  await expectText(b, "Before. Written offline.");
 });
 
 test("refreshing the page reopens the same document with its latest content", async ({ browser }) => {

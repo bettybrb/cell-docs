@@ -52,7 +52,7 @@ function CellExplorer() {
   // The body lives in a Y.Text, not in React state: a local draft until a
   // saved document is opened, then that document's live-synced Y.Text.
   const [draft] = useState(() => createDocSession("Hello from a DocCell."));
-  const [opened, setOpened] = useState<{ workspaceId: string; docId: string } | null>(null);
+  const [opened, setOpened] = useState<{ workspaceId: string; docId: string; createdAt: string } | null>(null);
   const [live, setLive] = useState<ConnectedDocSession | null>(null);
   // False until the first load has answered, so the draft is not shown in
   // place of a saved document that is still loading.
@@ -82,7 +82,10 @@ function CellExplorer() {
   // another document closes this connection first.
   useEffect(() => {
     if (!opened) return;
-    const session = connectDocSession(syncServerUrl(opened.workspaceId), opened.docId);
+    const session = connectDocSession(syncServerUrl(opened.workspaceId), opened.docId, {
+      // createdAt keeps a recreated document from picking up an old local copy.
+      localKey: `${opened.workspaceId}/${opened.docId}@${opened.createdAt}`,
+    });
     let current = true;
     void session.synced.then(() => current && setLive(session));
     return () => {
@@ -136,7 +139,7 @@ function CellExplorer() {
       // Id, title and body switch together; the body comes from the sync.
       setDocId(id);
       setTitle(r.data.title);
-      setOpened({ workspaceId, docId: id });
+      setOpened({ workspaceId, docId: id, createdAt: r.data.createdAt });
     }
     await refreshDocs(); // reading can register a Phase 1 document
   };
@@ -147,7 +150,7 @@ function CellExplorer() {
     // Saved under a different id than the open one (or the first save of the
     // draft): open the saved document so it syncs from now on.
     if (r.ok && (opened?.workspaceId !== workspaceId || opened.docId !== docId)) {
-      setOpened({ workspaceId, docId });
+      setOpened({ workspaceId, docId, createdAt: r.data.createdAt });
     }
     await refreshDocs();
   };

@@ -130,10 +130,11 @@ wrangler.jsonc                 bindings and SQLite migrations
   counts saves, not live edits.
 - The body length limit (100,000 characters) is only checked on `PUT`, not on
   live edits.
-- Collaborators are anonymous guests with random names (no accounts yet), and
-  edits made while offline exist only in that browser tab until it
-  reconnects: closing the tab while offline loses them.
+- Collaborators are anonymous guests with random names (no accounts yet).
+- Edits made offline are kept in the browser (IndexedDB) and synced the next
+  time the document is opened online, but a document cannot be *opened*
+  while offline. Local copies are never cleaned up automatically.
 - Only verified locally. Nothing has been deployed to Cloudflare.
-- The client bundle is about 930 kB (about 310 kB gzipped), mostly CodeMirror,
+- The client bundle is about 940 kB (about 310 kB gzipped), mostly CodeMirror,
   the language packages that `@codemirror/lang-markdown` pulls in, and Yjs, so
   `npm run build` warns about chunk size. Loading the editor lazily is deferred.

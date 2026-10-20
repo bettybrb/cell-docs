@@ -119,6 +119,16 @@ edits to `DocCell`, and anything others wrote meanwhile to the browser. Yjs
 merges both without losing either. After a backend restart the same happens,
 with `DocCell` first rebuilding its `Y.Doc` from SQLite.
 
+**Local copy (IndexedDB).** Each open document is also kept in the
+browser's IndexedDB (`y-indexeddb`), so edits made offline survive closing
+the tab, a crash or a browser restart. The next time the document is opened
+(online), the local copy is loaded into the fresh `Y.Doc`, merged with the
+server's state, and its edits count as unsaved until a save check confirms
+them. The local database is named after the document *and its `createdAt`*:
+if a document is recreated under the same id (for example after deleting
+`.wrangler/state`), old local copies are ignored instead of merging their
+text into the new document.
+
 **Saved acknowledgements.** The browser numbers its own edits and, 250 ms
 after the last one (or right after a reconnect's first sync), sends a *save
 check* `[100, n]` on the same socket (`src/shared/save-check.ts`). `DocCell`

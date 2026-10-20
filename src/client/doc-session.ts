@@ -1,5 +1,6 @@
 import * as decoding from "lib0/decoding";
 import type { Awareness } from "y-protocols/awareness";
+import { IndexeddbPersistence } from "y-indexeddb";
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
 import { MESSAGE_SAVE_CHECK, saveCheckMessage } from "../shared/save-check";
@@ -72,9 +73,30 @@ export interface ConnectedDocSession extends DocSession {
 export function connectDocSession(
   serverUrl: string,
   docId: string,
-  { user = randomGuest(), ...options }: { user?: Collaborator; WebSocketPolyfill?: typeof WebSocket } = {},
+  {
+    user = randomGuest(),
+    localKey,
+    ...options
+  }: {
+    user?: Collaborator;
+    /**
+     * Also keep the document in this browser's IndexedDB under this key, so
+     * edits made offline survive closing the tab. Include something that
+     * changes when the document is recreated (its createdAt), or an old local
+     * copy would merge its text into the new document.
+     */
+    localKey?: string;
+    WebSocketPolyfill?: typeof WebSocket;
+  } = {},
 ): ConnectedDocSession {
   const ydoc = new Y.Doc();
+  // Loads any local copy into ydoc (merging with what the server sends) and
+  // stores every later change. Edits loaded from it count as unsaved below
+  // until the server confirms them.
+  const local =
+    localKey !== undefined && "indexedDB" in globalThis // absent in Node (integration tests)
+      ? new IndexeddbPersistence(`cell-docs-lab:${localKey}`, ydoc)
+      : null;
   const provider = new WebsocketProvider(serverUrl, `${docId}/sync`, ydoc, {
     // Sync only through the server, not directly between tabs.
     disableBc: true,
@@ -155,6 +177,7 @@ export function connectDocSession(
     },
     destroy() {
       clearTimeout(checkTimer);
+      void local?.destroy(); // closes the local database; keeps its data
       provider.destroy();
       ydoc.destroy();
     },

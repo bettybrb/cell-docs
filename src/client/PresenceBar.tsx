@@ -13,7 +13,7 @@ type SaveState = "saved" | "saving" | "unsaved";
 const SAVE_TEXT: Record<SaveState, string> = {
   saved: "All changes saved",
   saving: "Saving…",
-  unsaved: "Not saved yet, will sync when back online",
+  unsaved: "Not on the server yet, kept on this device until back online",
 };
 
 /** Connection and save status plus the people connected to the open document. */
