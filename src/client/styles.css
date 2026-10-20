@@ -73,3 +73,7 @@ button[aria-current="true"] {
   border-radius: 50%;
   margin-right: 0.25em;
 }
+
+.field-status {
+  opacity: 0.7;
+}

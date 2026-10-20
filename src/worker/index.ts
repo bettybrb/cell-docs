@@ -108,7 +108,7 @@ function routeDoc(env: Env, workspaceId: string, docId: string, request: Request
       callCell(env.WORKSPACE_CELL, workspaceCellName(workspaceId), `/docs/${docId}`, {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ createdAt: doc.createdAt }),
+        body: JSON.stringify({ createdAt: doc.createdAt, title: doc.title }),
       }),
     ).pipe(
       Effect.as(response),

@@ -4,6 +4,7 @@ import { api, type ApiResult } from "./api";
 import { connectDocSession, createDocSession, latestOnly, type ConnectedDocSession } from "./doc-session";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { PresenceBar } from "./PresenceBar";
+import { useTitleAutosave, type TitleSaveState } from "./useTitleAutosave";
 
 export function App() {
   return (
@@ -62,6 +63,8 @@ function CellExplorer() {
   const [docs, setDocs] = useState<DocCatalogue["docs"] | "error">([]);
 
   const loads = useRef(latestOnly());
+  // The document list shows titles, so refresh it after each title save.
+  const titleAutosave = useTitleAutosave(opened, () => void refreshDocs());
 
   const display = (r: ApiResult<unknown>) =>
     setOutput(r.ok ? { status: r.status, ...(r.data as object) } : { status: r.status, error: r.error });
@@ -112,7 +115,7 @@ function CellExplorer() {
   useEffect(() => {
     if (!live) return;
     const warn = (event: BeforeUnloadEvent) => {
-      if (live.unsavedChanges() === 0) return;
+      if (live.unsavedChanges() === 0 && !titleAutosave.unsaved()) return;
       event.preventDefault();
       // Older browsers only show the prompt when returnValue is set.
       event.returnValue = "";
@@ -184,7 +187,7 @@ function CellExplorer() {
               {docs.map((d) => (
                 <li key={d.docId}>
                   <button onClick={() => loadDoc(d.docId)} aria-current={d.docId === docId}>
-                    {d.docId}
+                    {d.title || d.docId} {d.title && <small>({d.docId})</small>}
                   </button>
                 </li>
               ))}
@@ -197,7 +200,14 @@ function CellExplorer() {
         </label>
         <label>
           Title
-          <input value={title} onChange={(e) => setTitle(e.target.value)} />
+          <input
+            value={title}
+            onChange={(e) => {
+              setTitle(e.target.value);
+              titleAutosave.changed(e.target.value);
+            }}
+          />
+          {opened && <TitleStatus state={titleAutosave.state} />}
         </label>
         <div className="wide">
           Body (Markdown)
@@ -213,6 +223,20 @@ function CellExplorer() {
       </div>
       {output !== null && <pre data-testid="explorer-output">{JSON.stringify(output, null, 2)}</pre>}
     </section>
+  );
+}
+
+function TitleStatus({ state }: { state: TitleSaveState }) {
+  const text = {
+    saved: "Saved",
+    saving: "Saving…",
+    retrying: "Not saved, retrying…",
+    rejected: state.kind === "rejected" ? `Not saved: ${state.message}` : "",
+  }[state.kind];
+  return (
+    <small className="field-status" data-testid="title-status" data-state={state.kind}>
+      {text}
+    </small>
   );
 }
 

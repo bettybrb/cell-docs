@@ -147,7 +147,8 @@ workspace. A document request is handled in two steps:
 1. The router forwards the request to the `DocCell`, exactly as in Phase 1.
 2. If the response is `200` or `201`, the router registers the doc in the
    `WorkspaceCell` (internal path `PUT /docs/<docId>`, with the doc's
-   `createdAt`). Registration is idempotent.
+   `createdAt` and title). Registration is idempotent and refreshes the
+   catalogue's copy of the title, which the document list shows.
 
 Writing the `DocCell` first means a document is never listed before it
 exists. The two cells cannot share a transaction, so a crash or error between
@@ -184,7 +185,7 @@ cell_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
 
 -- WorkspaceCell
 workspace (id INTEGER PRIMARY KEY CHECK (id = 1), display_name, created_at, updated_at)
-documents (doc_id TEXT PRIMARY KEY, created_at)
+documents (doc_id TEXT PRIMARY KEY, created_at, title)  -- title: copy, NULL until next read/save
 
 -- DocCell
 doc (id INTEGER PRIMARY KEY CHECK (id = 1), title, body, revision, created_at, updated_at)

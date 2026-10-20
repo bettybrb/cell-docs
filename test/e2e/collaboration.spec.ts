@@ -303,6 +303,66 @@ test("edits made offline survive closing the tab and sync when it is reopened", 
   await expectText(b, "Before. Written offline.");
 });
 
+const titleStatus = (page: Page) => page.getByTestId("title-status");
+const savedTitle = async (ids: { ws: string; doc: string }) =>
+  (await request<DocState>(server.baseUrl, "GET", `/api/workspaces/${ids.ws}/docs/${ids.doc}`)).data.title;
+
+test("the title saves itself shortly after typing", async ({ browser }) => {
+  const ids = await createDoc("Body.");
+  const a = await newBrowser(browser);
+  await openDoc(a, ids);
+  await expect(titleStatus(a)).toHaveText("Saved");
+
+  await a.getByLabel("Title").fill("Autosaved title");
+  await expect(titleStatus(a)).toHaveText("Saving…");
+  await expect(titleStatus(a)).toHaveText("Saved");
+  expect(await savedTitle(ids)).toBe("Autosaved title");
+  await expect(a.getByTestId("doc-list")).toContainText("Autosaved title"); // the list follows
+
+  await a.reload();
+  await expect(a.getByLabel("Title")).toHaveValue("Autosaved title");
+  await expect(titleStatus(a)).toHaveText("Saved"); // loading did not trigger a save
+  await expectText(a, "Body.");
+});
+
+test("a pending title is saved when switching to another document", async ({ browser }) => {
+  const first = await createDoc("First.");
+  const second = { ws: first.ws, doc: dummyDocId() };
+  await request(server.baseUrl, "PUT", `/api/workspaces/${second.ws}/docs/${second.doc}`, { title: "Second title", body: "Second." });
+  const page = await newBrowser(browser);
+  await openDoc(page, first);
+
+  await page.getByLabel("Title").fill("Renamed just before switching");
+  await page.getByLabel("Doc id").fill(second.doc);
+  await page.getByRole("button", { name: "Load doc" }).click(); // well within the 1 s delay
+  await expectText(page, "Second.");
+
+  await expect.poll(() => savedTitle(first)).toBe("Renamed just before switching");
+  expect(await savedTitle(second)).toBe("Second title");
+  await expect(page.getByLabel("Title")).toHaveValue("Second title");
+});
+
+test("a title save retries after network failures and reports rejected titles", async ({ browser }) => {
+  const ids = await createDoc("Body.");
+  const page = await newBrowser(browser);
+  await openDoc(page, ids);
+
+  // Saving the title fails at the network level until the route is removed.
+  const docUrl = `**/api/workspaces/${ids.ws}/docs/${ids.doc}`;
+  await page.route(docUrl, (route) => (route.request().method() === "PUT" ? route.abort() : route.continue()));
+  await page.getByLabel("Title").fill("Saved after the outage");
+  await expect(titleStatus(page)).toHaveText("Not saved, retrying…");
+  await page.unroute(docUrl);
+  await expect(titleStatus(page)).toHaveText("Saved", { timeout: 10_000 });
+  expect(await savedTitle(ids)).toBe("Saved after the outage");
+
+  // A title the server rejects is reported, not retried.
+  await page.getByLabel("Title").fill("x".repeat(201));
+  await expect(titleStatus(page)).toHaveAttribute("data-state", "rejected");
+  await expect(titleStatus(page)).toContainText("at most 200");
+  expect(await savedTitle(ids)).toBe("Saved after the outage");
+});
+
 test("refreshing the page reopens the same document with its latest content", async ({ browser }) => {
   const ids = await createDoc("Saved.");
   const page = await newBrowser(browser);

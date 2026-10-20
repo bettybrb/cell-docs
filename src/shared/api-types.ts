@@ -43,7 +43,8 @@ export interface DocState {
 export interface DocCatalogue {
   cell: CellInfo;
   workspaceId: string;
-  docs: { docId: string; createdAt: string }[];
+  /** `title` is a copy, refreshed whenever the doc is read or saved; null if not known yet. */
+  docs: { docId: string; createdAt: string; title: string | null }[];
 }
 
 /*

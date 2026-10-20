@@ -126,8 +126,10 @@ wrangler.jsonc                 bindings and SQLite migrations
 - Reading a resource that was never written still creates an empty database
   file for that cell, because the cell creates its tables when it starts.
 - Opening a document connects it to live sync, so body edits are saved and
-  shared without pressing Save. The title still needs Save, and `revision`
-  counts saves, not live edits.
+  shared without pressing Save. The title saves itself about a second after
+  you stop typing, but it is not live: other browsers see a new title when
+  they reload or reopen the document, and the last title saved wins.
+  `revision` counts saves (including title autosaves), not live body edits.
 - The body length limit (100,000 characters) is only checked on `PUT`, not on
   live edits.
 - Collaborators are anonymous guests with random names (no accounts yet).

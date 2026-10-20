@@ -6,7 +6,7 @@ import { CELL_NAME_HEADER, errorResponse, json, readBody } from "../http";
 import { cellInfo, claimCellName, createCellMetaTable, storedCellName } from "./cell-meta";
 
 /** Body of the router's internal "register this document" call. */
-const RegisterDocRequest = Schema.Struct({ createdAt: Schema.NonEmptyString });
+const RegisterDocRequest = Schema.Struct({ createdAt: Schema.NonEmptyString, title: Schema.String });
 
 interface WorkspaceRow {
   display_name: string;
@@ -18,6 +18,7 @@ interface WorkspaceRow {
 interface DocumentRow {
   doc_id: string;
   created_at: string;
+  title: string | null;
   [column: string]: SqlStorageValue;
 }
 
@@ -46,8 +47,14 @@ export class WorkspaceCell extends DurableObject<Env> {
     )`);
     this.sql.exec(`CREATE TABLE IF NOT EXISTS documents (
       doc_id     TEXT PRIMARY KEY,
-      created_at TEXT NOT NULL
+      created_at TEXT NOT NULL,
+      title      TEXT -- copy of the doc's title; NULL until it is next read or saved
     )`);
+    // Catalogues created before titles were tracked lack the column.
+    const columns = this.sql.exec<{ name: string }>(`PRAGMA table_info(documents)`).toArray();
+    if (!columns.some((column) => column.name === "title")) {
+      this.sql.exec(`ALTER TABLE documents ADD COLUMN title TEXT`);
+    }
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -77,33 +84,41 @@ export class WorkspaceCell extends DurableObject<Env> {
 
   private listDocs(name: string, workspaceId: string): Response {
     const rows = this.sql
-      .exec<DocumentRow>(`SELECT doc_id, created_at FROM documents ORDER BY created_at, doc_id`)
+      .exec<DocumentRow>(`SELECT doc_id, created_at, title FROM documents ORDER BY created_at, doc_id`)
       .toArray();
     const catalogue: DocCatalogue = {
       cell: cellInfo("workspace", name, this.ctx),
       workspaceId,
-      docs: rows.map((row) => ({ docId: row.doc_id, createdAt: row.created_at })),
+      docs: rows.map((row) => ({ docId: row.doc_id, createdAt: row.created_at, title: row.title })),
     };
     return json(catalogue);
   }
 
   /**
-   * Adds a document to the catalogue. Safe to repeat: an existing entry is
-   * left unchanged, so retries and re-registrations are harmless.
+   * Adds a document to the catalogue, or updates its title copy. Safe to
+   * repeat, so retries and re-registrations are harmless.
    */
   private async registerDoc(request: Request, name: string, docId: string): Promise<Response> {
     const body = await readBody(request, RegisterDocRequest);
     if (body instanceof Response) return body;
-    const { createdAt } = body;
+    const { createdAt, title } = body;
 
-    const exists = this.sql.exec(`SELECT 1 FROM documents WHERE doc_id = ?`, docId).toArray().length > 0;
-    if (exists) return new Response(null, { status: 204 });
+    const existing = this.sql
+      .exec<{ title: string | null }>(`SELECT title FROM documents WHERE doc_id = ?`, docId)
+      .toArray()[0];
+    if (existing && existing.title === title) return new Response(null, { status: 204 });
 
     this.ctx.storage.transactionSync(() => {
       claimCellName(this.sql, name);
-      this.sql.exec(`INSERT OR IGNORE INTO documents (doc_id, created_at) VALUES (?, ?)`, docId, createdAt);
+      this.sql.exec(
+        `INSERT INTO documents (doc_id, created_at, title) VALUES (?, ?, ?)
+         ON CONFLICT (doc_id) DO UPDATE SET title = excluded.title`,
+        docId,
+        createdAt,
+        title,
+      );
     });
-    return new Response(null, { status: 201 });
+    return new Response(null, { status: existing ? 204 : 201 });
   }
 
   private read(name: string, workspaceId: string): Response {
