@@ -76,7 +76,18 @@ since two browsers doing so would duplicate it.
 forwarded; Durable Objects hold outgoing messages until those writes are
 durable. Sockets use the Hibernation API, so an idle cell can leave memory
 with connections open and rebuild its `Y.Doc` from SQLite on the next
-message. Above 100 stored updates, loading merges them into one row.
+message. Whenever the log holds more than 500 updates (checked on load and
+after every update), they are merged into one row.
+
+**Damaged storage.** Because `doc.body` is written together with every
+update, it is the latest known text, and loading compares the Yjs text with
+it. A stored update that cannot be read is moved to `yjs_quarantine` (kept,
+never loaded). A missing update makes Yjs silently leave out everything that
+depends on it. In either case, if the loaded text differs from `doc.body`,
+`DocCell` repairs the Yjs state with an ordinary edit that replaces only the
+differing range, and logs it. The repair is stored and synced like any edit.
+Caveat: if a browser that still holds the lost update reconnects later, Yjs
+adds that update's content again, so some text may appear twice.
 
 Only existing documents can be opened (`404` otherwise); documents are still
 created with `PUT`.
@@ -168,6 +179,7 @@ documents (doc_id TEXT PRIMARY KEY, created_at)
 -- DocCell
 doc (id INTEGER PRIMARY KEY CHECK (id = 1), title, body, revision, created_at, updated_at)
 yjs_updates (seq INTEGER PRIMARY KEY AUTOINCREMENT, data BLOB)  -- body = merged updates
+yjs_quarantine (seq INTEGER PRIMARY KEY, data BLOB, quarantined_at)  -- unreadable updates
 ```
 
 `CHECK (id = 1)` allows only one row, because each database belongs to exactly

@@ -16,8 +16,8 @@ import {
   type PresenceEntry,
 } from "./yjs-sync";
 
-/** Above this many stored updates, loading merges them into one row. */
-const COMPACT_AFTER_UPDATES = 100;
+/** Above this many stored updates, they are merged into one row. */
+export const COMPACT_AFTER_UPDATES = 500;
 
 /**
  * Presence of the client(s) on one socket, stored as the socket's attachment
@@ -49,6 +49,8 @@ export class DocCell extends DurableObject<Env> {
   private readonly sql: SqlStorage;
   /** Loaded on first use; rebuilt from SQLite after hibernation or restart. */
   private ydoc: Y.Doc | null = null;
+  /** Rows in yjs_updates, kept in step with the table once ydoc is loaded. */
+  private storedUpdates = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -67,6 +69,12 @@ export class DocCell extends DurableObject<Env> {
     this.sql.exec(`CREATE TABLE IF NOT EXISTS yjs_updates (
       seq  INTEGER PRIMARY KEY AUTOINCREMENT,
       data BLOB    NOT NULL
+    )`);
+    // Stored updates that could not be read; kept for inspection, never loaded.
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS yjs_quarantine (
+      seq            INTEGER PRIMARY KEY,
+      data           BLOB NOT NULL,
+      quarantined_at TEXT NOT NULL
     )`);
   }
 
@@ -234,28 +242,73 @@ export class DocCell extends DurableObject<Env> {
 
   /**
    * Returns the document's Yjs state, loading it from SQLite if needed.
-   * A document written before Yjs existed has no stored updates yet; its
-   * plain-text body becomes the initial Y.Text, once, here on the server.
+   *
+   * `doc.body` is written together with every update, so it is the latest
+   * known text. If the loaded Yjs text differs from it, the Yjs state is
+   * brought in line with an ordinary edit. That covers:
+   *   - documents written before Yjs existed (no updates yet): their body
+   *     becomes the initial Y.Text, once, here on the server;
+   *   - a stored update that cannot be read: it is moved to yjs_quarantine;
+   *   - a missing update: Yjs cannot apply what depends on it, and the text
+   *     comes out wrong without any error.
    */
   private loadYDoc(): Y.Doc {
     if (this.ydoc) return this.ydoc;
     const ydoc = new Y.Doc();
-    const rows = this.sql.exec<{ data: ArrayBuffer }>(`SELECT data FROM yjs_updates ORDER BY seq`).toArray();
-    for (const row of rows) Y.applyUpdate(ydoc, new Uint8Array(row.data));
-
-    if (rows.length > COMPACT_AFTER_UPDATES) {
-      this.ctx.storage.transactionSync(() => {
-        this.sql.exec(`DELETE FROM yjs_updates`);
-        this.sql.exec(`INSERT INTO yjs_updates (data) VALUES (?)`, Y.encodeStateAsUpdate(ydoc));
-      });
+    const rows = this.sql.exec<{ seq: number; data: ArrayBuffer }>(`SELECT seq, data FROM yjs_updates ORDER BY seq`).toArray();
+    const unreadable: number[] = [];
+    for (const row of rows) {
+      try {
+        Y.applyUpdate(ydoc, new Uint8Array(row.data));
+      } catch {
+        unreadable.push(row.seq);
+      }
     }
+    if (unreadable.length > 0) this.quarantine(unreadable);
+    this.storedUpdates = rows.length - unreadable.length;
 
     ydoc.on("update", (update: Uint8Array, origin: unknown) => this.onUpdate(update, origin));
     this.ydoc = ydoc;
 
-    const row = this.loadRow();
-    if (rows.length === 0 && row && row.body !== "") ydoc.getText("body").insert(0, row.body);
+    const body = this.loadRow()?.body ?? "";
+    const text = ydoc.getText("body");
+    if (text.toString() !== body) {
+      if (rows.length > 0) {
+        console.error(
+          `DocCell ${storedCellName(this.sql)}: stored Yjs state does not match the saved text ` +
+            `(${unreadable.length} unreadable update(s)); repairing from the saved text.`,
+        );
+      }
+      replaceText(text, body); // stored and broadcast by onUpdate
+    }
+
+    if (this.storedUpdates > COMPACT_AFTER_UPDATES) this.compact();
     return ydoc;
+  }
+
+  /** Moves unreadable update rows out of the log, keeping them for inspection. */
+  private quarantine(seqs: number[]): void {
+    const now = new Date().toISOString();
+    this.ctx.storage.transactionSync(() => {
+      for (const seq of seqs) {
+        this.sql.exec(
+          `INSERT INTO yjs_quarantine (seq, data, quarantined_at) SELECT seq, data, ? FROM yjs_updates WHERE seq = ?`,
+          now,
+          seq,
+        );
+        this.sql.exec(`DELETE FROM yjs_updates WHERE seq = ?`, seq);
+      }
+    });
+    console.error(`DocCell ${storedCellName(this.sql)}: quarantined unreadable update(s) ${seqs.join(", ")}.`);
+  }
+
+  /** Replaces the update log with one row holding the merged state. */
+  private compact(): void {
+    this.ctx.storage.transactionSync(() => {
+      this.sql.exec(`DELETE FROM yjs_updates`);
+      this.sql.exec(`INSERT INTO yjs_updates (data) VALUES (?)`, Y.encodeStateAsUpdate(this.ydoc!));
+    });
+    this.storedUpdates = 1;
   }
 
   /**
@@ -271,6 +324,7 @@ export class DocCell extends DurableObject<Env> {
       this.ydoc!.getText("body").toString(),
       new Date().toISOString(),
     );
+    if (++this.storedUpdates > COMPACT_AFTER_UPDATES) this.compact();
     this.broadcast(updateMessage(update), origin);
   }
 
