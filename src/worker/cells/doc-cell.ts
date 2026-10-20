@@ -1,6 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import * as Y from "yjs";
-import { UpdateDocRequest, type DocState } from "../../shared/api-types";
+import { UpdateDocRequest, type DocState, type DocVersion, type DocVersionList } from "../../shared/api-types";
 import { parseCellName } from "../addressing";
 import { CELL_NAME_HEADER, errorResponse, json, readBody } from "../http";
 import { isSaveCheck } from "../../shared/save-check";
@@ -18,6 +18,14 @@ import {
 
 /** Above this many stored updates, they are merged into one row. */
 export const COMPACT_AFTER_UPDATES = 500;
+/** Versions kept per document; older ones are deleted. */
+export const MAX_VERSIONS = 50;
+/** Live editing takes an automatic version when the newest one is at least this old. */
+export const AUTO_VERSION_INTERVAL_MS = 5 * 60 * 1000;
+const PREVIEW_LENGTH = 80;
+
+/** Transaction origin for changes the cell makes itself (saves, repairs, restores). */
+const SERVER_ORIGIN = "server";
 
 /**
  * Presence of the client(s) on one socket, stored as the socket's attachment
@@ -70,6 +78,13 @@ export class DocCell extends DurableObject<Env> {
       seq  INTEGER PRIMARY KEY AUTOINCREMENT,
       data BLOB    NOT NULL
     )`);
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS doc_versions (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at TEXT NOT NULL,
+      reason     TEXT NOT NULL,
+      title      TEXT NOT NULL,
+      body       TEXT NOT NULL
+    )`);
     // Stored updates that could not be read; kept for inspection, never loaded.
     this.sql.exec(`CREATE TABLE IF NOT EXISTS yjs_quarantine (
       seq            INTEGER PRIMARY KEY,
@@ -89,8 +104,18 @@ export class DocCell extends DurableObject<Env> {
       return errorResponse(409, "cell_name_mismatch", `Cell belongs to ${stored}, not ${name}.`);
     }
 
-    if (new URL(request.url).pathname === "/sync") {
+    const path = new URL(request.url).pathname;
+    if (path === "/sync") {
       return this.openSync(request, address.docId);
+    }
+    if (path === "/versions") {
+      if (request.method !== "GET") return errorResponse(405, "method_not_allowed", `${request.method} is not supported.`);
+      return this.listVersions(name);
+    }
+    const restore = /^\/versions\/(\d+)\/restore$/.exec(path);
+    if (restore) {
+      if (request.method !== "POST") return errorResponse(405, "method_not_allowed", `${request.method} is not supported.`);
+      return this.restoreVersion(Number(restore[1]), name, address.workspaceId, address.docId);
     }
 
     switch (request.method) {
@@ -137,7 +162,7 @@ export class DocCell extends DurableObject<Env> {
           now,
         );
         // The update handler stores the change and rewrites doc.body.
-        if (ydoc) replaceText(ydoc.getText("body"), update.body!);
+        if (ydoc) replaceText(ydoc.getText("body"), update.body!, SERVER_ORIGIN);
       } else {
         this.sql.exec(
           `INSERT INTO doc (id, title, body, revision, created_at, updated_at)
@@ -150,7 +175,83 @@ export class DocCell extends DurableObject<Env> {
       }
     });
 
-    return json(this.toState(this.loadRow()!, name, workspaceId, docId), existing ? 200 : 201);
+    const saved = this.loadRow()!;
+    // A save with a body is a moment worth keeping; title-only autosaves are not.
+    if (update.body !== undefined) this.addVersion("save", saved.title, saved.body);
+    return json(this.toState(saved, name, workspaceId, docId), existing ? 200 : 201);
+  }
+
+  private listVersions(name: string): Response {
+    const rows = this.sql
+      .exec<{ id: number; created_at: string; reason: DocVersion["reason"]; title: string; body: string }>(
+        `SELECT id, created_at, reason, title, body FROM doc_versions ORDER BY id DESC`,
+      )
+      .toArray();
+    const list: DocVersionList = {
+      cell: cellInfo("doc", name, this.ctx),
+      versions: rows.map((row) => ({
+        id: row.id,
+        createdAt: row.created_at,
+        reason: row.reason,
+        title: row.title,
+        preview: row.body.slice(0, PREVIEW_LENGTH),
+        length: row.body.length,
+      })),
+    };
+    return json(list);
+  }
+
+  /**
+   * Makes the document match a stored version: the body as an ordinary Yjs
+   * edit (so open browsers update live) and the title. The current text is
+   * kept as a "restore" version first, so a restore can itself be undone.
+   */
+  private restoreVersion(id: number, name: string, workspaceId: string, docId: string): Response {
+    const version = this.sql
+      .exec<{ title: string; body: string }>(`SELECT title, body FROM doc_versions WHERE id = ?`, id)
+      .toArray()[0];
+    const current = this.loadRow();
+    if (!version || !current) return errorResponse(404, "version_not_found", `Version ${id} does not exist.`);
+
+    const ydoc = this.loadYDoc();
+    this.ctx.storage.transactionSync(() => {
+      this.addVersion("restore", current.title, current.body);
+      this.sql.exec(
+        `UPDATE doc SET title = ?, revision = revision + 1, updated_at = ? WHERE id = 1`,
+        version.title,
+        new Date().toISOString(),
+      );
+      replaceText(ydoc.getText("body"), version.body, SERVER_ORIGIN);
+    });
+    return json(this.toState(this.loadRow()!, name, workspaceId, docId));
+  }
+
+  /** Stores a version and drops the oldest beyond MAX_VERSIONS. */
+  private addVersion(reason: DocVersion["reason"], title: string, body: string): void {
+    this.sql.exec(
+      `INSERT INTO doc_versions (created_at, reason, title, body) VALUES (?, ?, ?, ?)`,
+      new Date().toISOString(),
+      reason,
+      title,
+      body,
+    );
+    this.sql.exec(
+      `DELETE FROM doc_versions WHERE id NOT IN (SELECT id FROM doc_versions ORDER BY id DESC LIMIT ?)`,
+      MAX_VERSIONS,
+    );
+  }
+
+  /**
+   * Before a live edit from a browser: if the newest version is old enough
+   * (or there is none), keep the text as it was just before this edit.
+   */
+  private autoVersion(): void {
+    const newest = this.sql
+      .exec<{ created_at: string }>(`SELECT created_at FROM doc_versions ORDER BY id DESC LIMIT 1`)
+      .toArray()[0];
+    if (newest && Date.now() - Date.parse(newest.created_at) < AUTO_VERSION_INTERVAL_MS) return;
+    const before = this.loadRow();
+    if (before) this.addVersion("auto", before.title, before.body);
   }
 
   /** Upgrades the request to a WebSocket that syncs this document. */
@@ -279,7 +380,7 @@ export class DocCell extends DurableObject<Env> {
             `(${unreadable.length} unreadable update(s)); repairing from the saved text.`,
         );
       }
-      replaceText(text, body); // stored and broadcast by onUpdate
+      replaceText(text, body, SERVER_ORIGIN); // stored and broadcast by onUpdate
     }
 
     if (this.storedUpdates > COMPACT_AFTER_UPDATES) this.compact();
@@ -318,6 +419,8 @@ export class DocCell extends DurableObject<Env> {
    * writes are durable, so nothing is forwarded before it is stored.
    */
   private onUpdate(update: Uint8Array, origin: unknown): void {
+    // doc.body still holds the text from before this edit at this point.
+    if (origin !== SERVER_ORIGIN) this.autoVersion();
     this.sql.exec(`INSERT INTO yjs_updates (data) VALUES (?)`, update);
     this.sql.exec(
       `UPDATE doc SET body = ?, updated_at = ? WHERE id = 1`,

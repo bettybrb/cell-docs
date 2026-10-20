@@ -76,6 +76,23 @@ export const UpdateDocRequest = Schema.Struct({
 );
 export type UpdateDocRequest = typeof UpdateDocRequest.Type;
 
+/** A stored copy of a document; `reason` says why it was taken. */
+export interface DocVersion {
+  id: number;
+  createdAt: string;
+  /** "save": a manual save. "auto": before live edits, at most every 5 minutes. "restore": before a restore. */
+  reason: "save" | "auto" | "restore";
+  title: string;
+  /** The first characters of the body. */
+  preview: string;
+  length: number;
+}
+
+export interface DocVersionList {
+  cell: CellInfo;
+  versions: DocVersion[]; // newest first
+}
+
 export interface HealthResponse {
   ok: true;
   service: "cell-docs-lab";

@@ -77,3 +77,11 @@ button[aria-current="true"] {
 .field-status {
   opacity: 0.7;
 }
+
+.versions ul {
+  padding-left: 1em;
+}
+
+.versions .preview {
+  opacity: 0.7;
+}

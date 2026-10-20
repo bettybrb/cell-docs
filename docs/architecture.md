@@ -139,6 +139,24 @@ vectors would miss those). The editor shows "All changes saved", "Saving…"
 or "Not saved yet, will sync when back online", and the page asks before
 closing while anything is unconfirmed.
 
+## Version history
+
+`DocCell` keeps up to 50 versions (title and full body) in `doc_versions`:
+
+- **On a manual save** (a `PUT` that includes a body): the saved text.
+  Title-only autosaves do not create versions.
+- **Before live edits**, when the newest version is at least 5 minutes old:
+  the text from just before the edit (read from `doc.body` before the
+  update handler rewrites it). Changes the cell makes itself (saves,
+  repairs, restores) do not trigger this.
+- **Before a restore**: the text being replaced, so a restore can be undone
+  by restoring that version.
+
+A restore applies the body as an ordinary Yjs edit (only the differing
+range), so every open browser updates live, sets the title, and raises the
+revision. It goes through the router like a save, which refreshes the
+catalogue's title copy.
+
 ## Document catalogue
 
 Each `WorkspaceCell` keeps a `documents` table listing the docs in its
@@ -191,6 +209,7 @@ documents (doc_id TEXT PRIMARY KEY, created_at, title)  -- title: copy, NULL unt
 doc (id INTEGER PRIMARY KEY CHECK (id = 1), title, body, revision, created_at, updated_at)
 yjs_updates (seq INTEGER PRIMARY KEY AUTOINCREMENT, data BLOB)  -- body = merged updates
 yjs_quarantine (seq INTEGER PRIMARY KEY, data BLOB, quarantined_at)  -- unreadable updates
+doc_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at, reason, title, body)  -- newest 50
 ```
 
 `CHECK (id = 1)` allows only one row, because each database belongs to exactly

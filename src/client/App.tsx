@@ -5,6 +5,7 @@ import { connectDocSession, createDocSession, latestOnly, type ConnectedDocSessi
 import { MarkdownEditor } from "./MarkdownEditor";
 import { PresenceBar } from "./PresenceBar";
 import { useTitleAutosave, type TitleSaveState } from "./useTitleAutosave";
+import { VersionHistory } from "./VersionHistory";
 
 export function App() {
   return (
@@ -61,6 +62,8 @@ function CellExplorer() {
   const text = opened ? live?.text : ready ? draft.text : undefined;
   const [output, setOutput] = useState<unknown>(null);
   const [docs, setDocs] = useState<DocCatalogue["docs"] | "error">([]);
+  // Bumped after a manual save so the version list picks up the new version.
+  const [versionsKey, setVersionsKey] = useState(0);
 
   const loads = useRef(latestOnly());
   // The document list shows titles, so refresh it after each title save.
@@ -155,6 +158,7 @@ function CellExplorer() {
     if (r.ok && (opened?.workspaceId !== workspaceId || opened.docId !== docId)) {
       setOpened({ workspaceId, docId, createdAt: r.data.createdAt });
     }
+    setVersionsKey((key) => key + 1);
     await refreshDocs();
   };
 
@@ -220,6 +224,19 @@ function CellExplorer() {
             Save doc
           </button>
         </div>
+        {opened && (
+          <VersionHistory
+            workspaceId={opened.workspaceId}
+            docId={opened.docId}
+            reloadKey={versionsKey}
+            onRestored={(doc) => {
+              // The body arrives through live sync; the title is set here.
+              setTitle(doc.title);
+              display({ ok: true, status: 200, data: doc });
+              void refreshDocs();
+            }}
+          />
+        )}
       </div>
       {output !== null && <pre data-testid="explorer-output">{JSON.stringify(output, null, 2)}</pre>}
     </section>

@@ -49,7 +49,7 @@ export function handleMessage(data: Uint8Array, ydoc: Y.Doc, origin: unknown): U
  * Makes `text` equal to `next` by replacing only the part that differs, so
  * a save that changes one word does not rewrite (and conflict with) the rest.
  */
-export function replaceText(text: Y.Text, next: string): void {
+export function replaceText(text: Y.Text, next: string, origin: unknown = null): void {
   const current = text.toString();
   if (current === next) return;
   let start = 0;
@@ -62,10 +62,10 @@ export function replaceText(text: Y.Text, next: string): void {
   ) {
     end++;
   }
-  text.doc!.transact(() => {
+  text.doc!.transact((): void => {
     text.delete(start, current.length - start - end);
     text.insert(start, next.slice(start, next.length - end));
-  });
+  }, origin);
 }
 
 /**

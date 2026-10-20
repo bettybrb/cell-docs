@@ -363,6 +363,33 @@ test("a title save retries after network failures and reports rejected titles", 
   expect(await savedTitle(ids)).toBe("Saved after the outage");
 });
 
+test("restoring a version brings back deleted text in every open browser", async ({ browser }) => {
+  const ids = await createDoc("Important text."); // creating it with a body keeps a version
+  const [a, b] = [await newBrowser(browser), await newBrowser(browser)];
+  await openDoc(a, ids);
+  await openDoc(b, ids);
+
+  // Someone wipes the document.
+  await editor(b).click();
+  await b.keyboard.press("ControlOrMeta+A");
+  await b.keyboard.press("Backspace");
+  await expectText(a, "");
+
+  await a.getByText("Versions").click();
+  const versions = a.getByTestId("version");
+  await expect(versions).toHaveCount(1);
+  await expect(versions.first()).toContainText("Saved");
+  await expect(versions.first()).toContainText("Important text.");
+  await versions.first().getByRole("button", { name: "Restore" }).click();
+
+  await expectText(a, "Important text.");
+  await expectText(b, "Important text."); // live, without reloading
+  // The wiped state was kept too, so the restore can be undone.
+  await expect(versions).toHaveCount(2);
+  await expect(versions.first()).toContainText("Before a restore");
+  await expect(versions.first()).toContainText("(empty)");
+});
+
 test("refreshing the page reopens the same document with its latest content", async ({ browser }) => {
   const ids = await createDoc("Saved.");
   const page = await newBrowser(browser);

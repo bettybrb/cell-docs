@@ -55,6 +55,8 @@ Delete that folder to start from an empty state.
 | `GET` | `/api/workspaces/:workspaceId/docs` | `WorkspaceCell` (the document catalogue) |
 | `GET` / `PUT` | `/api/workspaces/:workspaceId/docs/:docId` | `DocCell` named `doc:<workspaceId>/<docId>`, then `WorkspaceCell` to register it |
 | `GET` (WebSocket) | `/api/workspaces/:workspaceId/docs/:docId/sync` | `DocCell`: live Yjs sync of the body (existing docs only) |
+| `GET` | `/api/workspaces/:workspaceId/docs/:docId/versions` | `DocCell`: stored versions, newest first (preview only) |
+| `POST` | `/api/workspaces/:workspaceId/docs/:docId/versions/:id/restore` | `DocCell`, then `WorkspaceCell`: restore title and body |
 
 Ids use lowercase letters, digits and dashes (1–63 characters).
 `GET` returns `404` until the resource has been written once. The document

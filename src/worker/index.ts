@@ -27,7 +27,9 @@ type Route =
   | { type: "workspace"; workspaceId: string }
   | { type: "docs"; workspaceId: string }
   | { type: "doc"; workspaceId: string; docId: string }
-  | { type: "doc-sync"; workspaceId: string; docId: string };
+  | { type: "doc-sync"; workspaceId: string; docId: string }
+  | { type: "doc-versions"; workspaceId: string; docId: string }
+  | { type: "doc-restore"; workspaceId: string; docId: string; versionId: string };
 
 export function matchRoute(pathname: string): Route | null {
   if (pathname === "/api/health") return { type: "health" };
@@ -35,7 +37,7 @@ export function matchRoute(pathname: string): Route | null {
   const parts = pathname.split("/").filter(Boolean); // ["api", "workspaces", ...]
   if (parts[0] !== "api" || parts[1] !== "workspaces") return null;
 
-  const [, , workspaceId, docsSegment, docId, syncSegment] = parts;
+  const [, , workspaceId, docsSegment, docId, syncSegment, versionId, restoreSegment] = parts;
   if (parts.length === 3 && isValidId(workspaceId)) {
     return { type: "workspace", workspaceId };
   }
@@ -47,6 +49,13 @@ export function matchRoute(pathname: string): Route | null {
   }
   if (parts.length === 6 && docsSegment === "docs" && syncSegment === "sync" && isValidId(workspaceId) && isValidId(docId)) {
     return { type: "doc-sync", workspaceId, docId };
+  }
+  const isDoc = docsSegment === "docs" && isValidId(workspaceId) && isValidId(docId);
+  if (parts.length === 6 && isDoc && syncSegment === "versions") {
+    return { type: "doc-versions", workspaceId, docId };
+  }
+  if (parts.length === 8 && isDoc && syncSegment === "versions" && /^\d+$/.test(versionId) && restoreSegment === "restore") {
+    return { type: "doc-restore", workspaceId, docId, versionId };
   }
   return null;
 }
@@ -71,6 +80,11 @@ export default {
         return forwardToCell(env.WORKSPACE_CELL, workspaceCellName(route.workspaceId), request, "/docs");
       case "doc":
         return routeDoc(env, route.workspaceId, route.docId, request);
+      case "doc-versions":
+        return forwardToCell(env.DOC_CELL, docCellName(route.workspaceId, route.docId), request, "/versions");
+      case "doc-restore":
+        // Like a save: the title may change, so the catalogue copy is refreshed.
+        return routeDoc(env, route.workspaceId, route.docId, request, `/versions/${route.versionId}/restore`);
       case "doc-sync":
         // WebSocket upgrade: only the Upgrade header is passed on, no body.
         return callCell(env.DOC_CELL, docCellName(route.workspaceId, route.docId), "/sync", {
@@ -98,9 +112,17 @@ export default {
  * The DocCell call itself is neither retried nor timed out: a PUT raises the
  * revision, so repeating it could apply a save twice.
  */
-function routeDoc(env: Env, workspaceId: string, docId: string, request: Request): Promise<Response> {
+function routeDoc(
+  env: Env,
+  workspaceId: string,
+  docId: string,
+  request: Request,
+  cellPath = "/",
+): Promise<Response> {
   const program = Effect.gen(function* () {
-    const response = yield* Effect.promise(() => forwardToCell(env.DOC_CELL, docCellName(workspaceId, docId), request));
+    const response = yield* Effect.promise(() =>
+      forwardToCell(env.DOC_CELL, docCellName(workspaceId, docId), request, cellPath),
+    );
     if (response.status !== 200 && response.status !== 201) return response;
 
     const doc = yield* Effect.promise(() => response.clone().json() as Promise<DocState>);

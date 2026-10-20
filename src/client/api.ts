@@ -2,6 +2,7 @@ import type {
   ApiError,
   DocCatalogue,
   DocState,
+  DocVersionList,
   HealthResponse,
   UpdateDocRequest,
   UpdateWorkspaceRequest,
@@ -39,6 +40,12 @@ export const api = {
 
   getDoc: (workspaceId: string, docId: string) =>
     call<DocState>("GET", `/api/workspaces/${enc(workspaceId)}/docs/${enc(docId)}`),
+
+  listVersions: (workspaceId: string, docId: string) =>
+    call<DocVersionList>("GET", `/api/workspaces/${enc(workspaceId)}/docs/${enc(docId)}/versions`),
+
+  restoreVersion: (workspaceId: string, docId: string, versionId: number) =>
+    call<DocState>("POST", `/api/workspaces/${enc(workspaceId)}/docs/${enc(docId)}/versions/${versionId}/restore`),
 
   putDoc: (workspaceId: string, docId: string, update: UpdateDocRequest) =>
     call<DocState>("PUT", `/api/workspaces/${enc(workspaceId)}/docs/${enc(docId)}`, update),
