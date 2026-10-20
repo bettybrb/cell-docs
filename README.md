@@ -88,9 +88,11 @@ curl localhost:5180/api/workspaces/demo/docs/intro
    it with `sqlite3 -readonly <file> "SELECT * FROM doc"`.
 5. **Collaboration:** open the same doc in two browser windows (or one normal
    and one private window). Typing in one appears in the other; the line above
-   the editor shows "● Connected" and who is here. Stop `npm run dev`: both
-   show "Offline, reconnecting…" and stay editable. Start it again: both
-   reconnect and the edits made meanwhile appear in both.
+   the editor shows "● Connected", whether your edits are saved, and who is
+   here. Stop `npm run dev`: both show "Offline, reconnecting…" and "Not
+   saved yet", stay editable, and ask before you close the tab. Start it
+   again: both reconnect, edits made meanwhile appear in both, and the status
+   returns to "All changes saved".
 
 ## Project layout
 

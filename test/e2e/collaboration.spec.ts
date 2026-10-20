@@ -76,6 +76,7 @@ const expectText = (page: Page, text: string) => expect.poll(() => docText(page)
 const expectContains = (page: Page, text: string) => expect.poll(() => docText(page)).toContain(text);
 const status = (page: Page) => page.getByTestId("connection-status");
 const collaboratorCount = (page: Page) => page.getByTestId("collaborator-count");
+const saveStatus = (page: Page) => page.getByTestId("save-status");
 
 /** Types at the end of the document, like a user would. */
 async function typeAtEnd(page: Page, text: string): Promise<void> {
@@ -169,6 +170,49 @@ test("a browser that loses its connection reconnects and keeps every edit", asyn
   await expectContains(a, "B meanwhile.");
   await expectText(a, await docText(b));
   await expect(collaboratorCount(b)).toHaveText("2");
+});
+
+test("shows whether edits are saved and warns before closing with unsaved edits", async ({ browser }) => {
+  const ids = await createDoc("Start.");
+  const page = await newBrowser(browser);
+  let blocked = false;
+  const routes: WebSocketRoute[] = [];
+  await page.routeWebSocket(/\/sync$/, (ws) => {
+    if (blocked) {
+      ws.close({ code: 1006, reason: "test: offline" });
+      return;
+    }
+    routes.push(ws, ws.connectToServer());
+  });
+  await openDoc(page, ids);
+  await expect(saveStatus(page)).toHaveAttribute("data-state", "saved");
+
+  // Online: "All changes saved" means the server really has the edit.
+  await typeAtEnd(page, " One.");
+  await expect(saveStatus(page)).toHaveAttribute("data-state", "saving"); // not a leftover "saved"
+  await expect(saveStatus(page)).toHaveAttribute("data-state", "saved");
+  const body = async () =>
+    (await request<DocState>(server.baseUrl, "GET", `/api/workspaces/${ids.ws}/docs/${ids.doc}`)).data.body;
+  expect(await body()).toBe("Start. One.");
+
+  // Offline: edits are reported as not saved, and closing the tab asks first.
+  blocked = true;
+  await Promise.all(routes.splice(0).map((route) => route.close({ code: 1006, reason: "test: offline" })));
+  await expect(status(page)).toHaveAttribute("data-status", "disconnected");
+  await typeAtEnd(page, " Two.");
+  await expect(saveStatus(page)).toHaveAttribute("data-state", "unsaved");
+  await expect(saveStatus(page)).toHaveText("Not saved yet, will sync when back online");
+
+  const dialog = page.waitForEvent("dialog");
+  await page.close({ runBeforeUnload: true });
+  const warning = await dialog;
+  expect(warning.type()).toBe("beforeunload");
+  await warning.dismiss(); // stay on the page
+
+  // Back online: saved again, and the server has the offline edit.
+  blocked = false;
+  await expect(saveStatus(page)).toHaveAttribute("data-state", "saved");
+  expect(await body()).toBe("Start. One. Two.");
 });
 
 test("refreshing the page reopens the same document with its latest content", async ({ browser }) => {

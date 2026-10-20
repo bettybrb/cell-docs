@@ -7,7 +7,8 @@ import type * as Y from "yjs";
  * The parts of the standard Yjs WebSocket protocol (as spoken by the
  * `y-websocket` client) that DocCell uses. Every message starts with a type:
  * 0 = sync (state exchange and updates), 1 = awareness (presence: who is
- * connected, their name and cursor).
+ * connected, their name and cursor). 100 = save check, this project's own
+ * addition (see src/shared/save-check.ts).
  */
 const MESSAGE_SYNC = 0;
 const MESSAGE_AWARENESS = 1;

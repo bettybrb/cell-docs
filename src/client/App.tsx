@@ -105,6 +105,16 @@ function CellExplorer() {
     history.replaceState(null, "", `?${query}`);
   }, [opened]);
 
+  // Ask before leaving the page while edits are not confirmed as saved.
+  useEffect(() => {
+    if (!live) return;
+    const warn = (event: BeforeUnloadEvent) => {
+      if (live.unsavedChanges() > 0) event.preventDefault();
+    };
+    addEventListener("beforeunload", warn);
+    return () => removeEventListener("beforeunload", warn);
+  }, [live]);
+
   // Reload the catalogue whenever the workspace id changes.
   useEffect(() => {
     void refreshDocs();

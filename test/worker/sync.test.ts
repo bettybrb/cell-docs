@@ -6,6 +6,7 @@ import * as encoding from "lib0/encoding";
 import * as awarenessProtocol from "y-protocols/awareness";
 import * as Y from "yjs";
 import type { DocState } from "../../src/shared/api-types";
+import { isSaveCheck, readSaveCheck, saveCheckMessage } from "../../src/shared/save-check";
 import { docCellName } from "../../src/worker/addressing";
 import {
   handleMessage,
@@ -22,6 +23,8 @@ interface Client {
   text: Y.Text;
   awareness: awarenessProtocol.Awareness;
   closed: Promise<CloseEvent>;
+  /** Sequence numbers of save checks the server has answered. */
+  savedChecks: number[];
 }
 
 const open: WebSocket[] = [];
@@ -54,11 +57,16 @@ async function connect(ws: string, doc: string): Promise<Client> {
   awareness.setLocalState(null); // like y-websocket: no presence until the app sets it
   awarenesses.push(awareness);
   const closed = new Promise<CloseEvent>((resolve) => socket.addEventListener("close", resolve));
+  const savedChecks: number[] = [];
   const send = (data: Uint8Array) => {
     if (socket.readyState === WebSocket.OPEN) socket.send(data);
   };
   socket.addEventListener("message", (event) => {
     const data = new Uint8Array(event.data as ArrayBuffer);
+    if (isSaveCheck(data)) {
+      savedChecks.push(readSaveCheck(data));
+      return;
+    }
     if (isAwarenessMessage(data)) {
       const decoder = decoding.createDecoder(data);
       decoding.readVarUint(decoder);
@@ -82,7 +90,7 @@ async function connect(ws: string, doc: string): Promise<Client> {
     send(encoding.toUint8Array(encoder));
   });
   socket.send(syncStep1Message(ydoc));
-  return { socket, text: ydoc.getText("body"), awareness, closed };
+  return { socket, text: ydoc.getText("body"), awareness, closed, savedChecks };
 }
 
 /** Names of the *other* clients this client currently sees. */
@@ -266,5 +274,34 @@ describe("presence (awareness)", () => {
     encoding.writeVarUint8Array(message, encoding.toUint8Array(update));
     again.socket.send(encoding.toUint8Array(message));
     await vi.waitFor(() => expect(othersSeenBy(a)).toEqual(["B"]));
+  });
+});
+
+describe("save check", () => {
+  it("is answered only after the edits sent before it are stored, deletions included", async () => {
+    const [ws, doc] = [uniqueId("ws"), uniqueId("doc")];
+    await api("PUT", docPath(ws, doc), { body: "Hello world" });
+    const a = await connect(ws, doc);
+    await vi.waitFor(() => expect(a.text.toString()).toBe("Hello world"));
+
+    a.text.insert(11, "!");
+    a.text.delete(0, 6); // deletions do not show up in state vectors
+    a.socket.send(saveCheckMessage(7));
+    await vi.waitFor(() => expect(a.savedChecks).toEqual([7]));
+
+    // By the time the check was answered, the server had stored both edits.
+    const read = await api<DocState>("GET", docPath(ws, doc));
+    expect(read.data.body).toBe("world!");
+  });
+
+  it("answers only the client that asked", async () => {
+    const [ws, doc] = [uniqueId("ws"), uniqueId("doc")];
+    await api("PUT", docPath(ws, doc), { body: "x" });
+    const [a, b] = [await connect(ws, doc), await connect(ws, doc)];
+    a.socket.send(saveCheckMessage(1));
+    await vi.waitFor(() => expect(a.savedChecks).toEqual([1]));
+    b.socket.send(saveCheckMessage(2));
+    await vi.waitFor(() => expect(b.savedChecks).toEqual([2]));
+    expect(a.savedChecks).toEqual([1]);
   });
 });

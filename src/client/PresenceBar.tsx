@@ -5,30 +5,49 @@ import type { Collaborator, ConnectedDocSession, ConnectionStatus } from "./doc-
 const STATUS_TEXT: Record<ConnectionStatus, string> = {
   connecting: "○ Connecting…",
   connected: "● Connected",
-  disconnected: "○ Offline, reconnecting… (edits are kept)",
+  disconnected: "○ Offline, reconnecting…",
 };
 
-/** Connection status plus the people connected to the open document. */
+type SaveState = "saved" | "saving" | "unsaved";
+
+const SAVE_TEXT: Record<SaveState, string> = {
+  saved: "All changes saved",
+  saving: "Saving…",
+  unsaved: "Not saved yet, will sync when back online",
+};
+
+/** Connection and save status plus the people connected to the open document. */
 export function PresenceBar({ session }: { session: ConnectedDocSession }) {
   const [status, setStatus] = useState(session.status());
+  const [unsaved, setUnsaved] = useState(session.unsavedChanges());
   const [people, setPeople] = useState(() => collaborators(session.awareness));
 
   useEffect(() => {
-    const update = () => setPeople(collaborators(session.awareness));
-    session.awareness.on("change", update);
-    const stop = session.onStatus(setStatus);
-    update();
-    setStatus(session.status());
+    const updatePeople = () => setPeople(collaborators(session.awareness));
+    const updateStatus = () => {
+      setStatus(session.status());
+      setUnsaved(session.unsavedChanges());
+    };
+    session.awareness.on("change", updatePeople);
+    const stop = session.subscribe(updateStatus);
+    updatePeople();
+    updateStatus();
     return () => {
-      session.awareness.off("change", update);
+      session.awareness.off("change", updatePeople);
       stop();
     };
   }, [session]);
+
+  const saveState: SaveState = unsaved === 0 ? "saved" : status === "connected" ? "saving" : "unsaved";
 
   return (
     <p className="presence" data-testid="presence">
       <span data-testid="connection-status" data-status={status}>
         {STATUS_TEXT[status]}
+      </span>
+      {" · "}
+      <span data-testid="save-status" data-state={saveState}>
+        {SAVE_TEXT[saveState]}
       </span>
       {" · "}
       <span data-testid="collaborator-count">{people.length}</span> here:{" "}

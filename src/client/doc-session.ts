@@ -1,6 +1,11 @@
+import * as decoding from "lib0/decoding";
 import type { Awareness } from "y-protocols/awareness";
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
+import { MESSAGE_SAVE_CHECK, saveCheckMessage } from "../shared/save-check";
+
+/** How long after the last edit to ask the server to confirm it has saved. */
+const SAVE_CHECK_DELAY_MS = 250;
 
 /**
  * Client-side editing state for one document. The Y.Text is the source of
@@ -38,8 +43,10 @@ export interface ConnectedDocSession extends DocSession {
   /** Resolves once the first exchange with the DocCell is done. */
   synced: Promise<void>;
   status(): ConnectionStatus;
-  /** Calls `listener` on every status change; returns an unsubscribe function. */
-  onStatus(listener: (status: ConnectionStatus) => void): () => void;
+  /** Edits made in this browser that the server has not yet confirmed as saved. */
+  unsavedChanges(): number;
+  /** Calls `listener` whenever status() or unsavedChanges() changes; returns an unsubscribe function. */
+  subscribe(listener: () => void): () => void;
   /** Closes the connection. Call before switching documents. */
   destroy(): void;
 }
@@ -77,7 +84,37 @@ export function connectDocSession(
   awareness.setLocalStateField("user", user);
 
   let status: ConnectionStatus = "connecting";
-  const listeners = new Set<(status: ConnectionStatus) => void>();
+  const listeners = new Set<() => void>();
+  const notify = () => listeners.forEach((listener) => listener());
+
+  // Saved acknowledgements (src/shared/save-check.ts): number this browser's
+  // edits, ask the server to confirm the latest number, and count what is
+  // not confirmed yet.
+  let editCount = 0;
+  let confirmedCount = 0;
+  let checkTimer: ReturnType<typeof setTimeout> | undefined;
+  const sendSaveCheck = () => {
+    if (provider.wsconnected && provider.synced && editCount > confirmedCount) {
+      provider.ws?.send(saveCheckMessage(editCount));
+    }
+  };
+  ydoc.on("update", (_update: Uint8Array, origin: unknown) => {
+    if (origin === provider) return; // came from the server, so it is already saved there
+    editCount++;
+    notify();
+    clearTimeout(checkTimer);
+    checkTimer = setTimeout(sendSaveCheck, SAVE_CHECK_DELAY_MS);
+  });
+  provider.messageHandlers[MESSAGE_SAVE_CHECK] = (_encoder, decoder) => {
+    confirmedCount = Math.max(confirmedCount, decoding.readVarUint(decoder));
+    notify();
+  };
+  // After (re)connecting, edits made offline are sent during the first sync;
+  // a check sent once that sync is done therefore covers them too.
+  provider.on("sync", (isSynced) => {
+    if (isSynced) sendSaveCheck();
+  });
+
   provider.on("status", (event) => {
     status = event.status;
     if (status === "connected") {
@@ -86,7 +123,7 @@ export function connectDocSession(
       // (an update with the old clock would be ignored).
       awareness.setLocalState(awareness.getLocalState());
     }
-    listeners.forEach((listener) => listener(status));
+    notify();
   });
 
   return {
@@ -95,11 +132,13 @@ export function connectDocSession(
     awareness,
     synced,
     status: () => status,
-    onStatus(listener) {
+    unsavedChanges: () => editCount - confirmedCount,
+    subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
     destroy() {
+      clearTimeout(checkTimer);
       provider.destroy();
       ydoc.destroy();
     },

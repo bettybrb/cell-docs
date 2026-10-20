@@ -3,6 +3,7 @@ import * as Y from "yjs";
 import { UpdateDocRequest, type DocState } from "../../shared/api-types";
 import { parseCellName } from "../addressing";
 import { CELL_NAME_HEADER, errorResponse, json, readBody } from "../http";
+import { isSaveCheck } from "../../shared/save-check";
 import { cellInfo, claimCellName, createCellMetaTable, storedCellName } from "./cell-meta";
 import {
   awarenessMessage,
@@ -169,6 +170,12 @@ export class DocCell extends DurableObject<Env> {
     try {
       if (isAwarenessMessage(data)) {
         this.relayPresence(ws, data);
+        return;
+      }
+      if (isSaveCheck(data)) {
+        // Every earlier message from this socket is already stored, and the
+        // runtime holds this reply until those writes are durable.
+        ws.send(data);
         return;
       }
       const reply = handleMessage(data, this.loadYDoc(), ws);

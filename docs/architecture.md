@@ -108,6 +108,16 @@ edits to `DocCell`, and anything others wrote meanwhile to the browser. Yjs
 merges both without losing either. After a backend restart the same happens,
 with `DocCell` first rebuilding its `Y.Doc` from SQLite.
 
+**Saved acknowledgements.** The browser numbers its own edits and, 250 ms
+after the last one (or right after a reconnect's first sync), sends a *save
+check* `[100, n]` on the same socket (`src/shared/save-check.ts`). `DocCell`
+sends the message straight back. Messages on a socket are handled in order,
+and the runtime holds the reply until earlier writes are durable, so the
+answer means every edit up to `n` is stored, deletions included (state
+vectors would miss those). The editor shows "All changes saved", "Saving…"
+or "Not saved yet, will sync when back online", and the page asks before
+closing while anything is unconfirmed.
+
 ## Document catalogue
 
 Each `WorkspaceCell` keeps a `documents` table listing the docs in its
