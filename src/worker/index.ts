@@ -67,6 +67,8 @@ export function matchRoute(pathname: string): Route | null {
           return doc("/permissions", true);
         case "comments":
           return doc("/comments", false);
+        case "proposals": // asking the simulated agent, and listing what it proposed
+          return doc("/proposals", false);
         case "versions":
           return doc("/versions", false);
         case "meta": // folder and tags live in the catalogue
@@ -77,6 +79,17 @@ export function matchRoute(pathname: string): Route | null {
     if (action === "versions" && /^\d+$/.test(versionId)) {
       if (parts.length === 7) return doc(`/versions/${versionId}`, false);
       if (parts.length === 8 && restore === "restore") return doc(`/versions/${versionId}/restore`, true);
+    }
+    // /comments/<thread>/(replies|resolve) and /proposals/<id>/(apply|discard)
+    if (parts.length === 8 && /^\d+$/.test(versionId)) {
+      const step = restore;
+      if (action === "comments" && (step === "replies" || step === "resolve")) {
+        return doc(`/comments/${versionId}/${step}`, false);
+      }
+      if (action === "proposals" && (step === "apply" || step === "discard")) {
+        // Applying changes the text like a save, so the catalogue copy is refreshed.
+        return doc(`/proposals/${versionId}/${step}`, step === "apply");
+      }
     }
     return null;
   }

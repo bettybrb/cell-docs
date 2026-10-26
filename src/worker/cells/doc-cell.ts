@@ -2,25 +2,36 @@ import { DurableObject } from "cloudflare:workers";
 import * as Y from "yjs";
 import {
   AddCommentRequest,
+  ProposalRequest,
+  ReplyRequest,
+  ResolveRequest,
   UpdateDocRequest,
   UpdatePermissionsRequest,
   type CommentList,
+  type CommentThread,
   type DocComment,
   type DocState,
   type DocVersion,
   type DocVersionDetail,
   type DocVersionList,
+  type Proposal,
+  type ProposalChange,
+  type ProposalList,
 } from "../../shared/api-types";
 import {
   CLOSE_ACCESS_REVOKED,
   CLOSE_DOC_DELETED,
   CLOSE_EDIT_REJECTED,
+  changedMessage,
   roleMessage,
+  type ChangeTopic,
 } from "../../shared/doc-messages";
 import { allows, canManage, roleOf, type DocPermissions, type Role } from "../../shared/permissions";
+import { positionsToRange, rangeToPositions } from "../../shared/relative-positions";
 import { isSaveCheck } from "../../shared/save-check";
 import { DEFAULT_USER, isTestUser } from "../../shared/users";
 import { parseCellName, workspaceCellName } from "../addressing";
+import { computeChanges, simulateAgent } from "../agent";
 import { catalogueCopy } from "../catalogue-copy";
 import { CELL_NAME_HEADER, errorResponse, json, readBody, requestUser } from "../http";
 import {
@@ -56,6 +67,8 @@ export const DEFAULT_TRASH_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 /** After live edits, the catalogue's copy (used by search) is refreshed this much later. */
 export const CATALOGUE_REFRESH_DELAY_MS = 2_000;
 const PREVIEW_LENGTH = 80;
+/** Characters of surrounding text kept with each proposed change, for the preview. */
+const CHANGE_CONTEXT = 40;
 
 /** Transaction origin for changes the cell makes itself (saves, repairs, restores). */
 const SERVER_ORIGIN = "server";
@@ -95,6 +108,36 @@ interface VersionRow {
   body: string;
   [column: string]: SqlStorageValue;
 }
+
+interface CommentRow {
+  id: number;
+  created_at: string;
+  author: string;
+  body: string;
+  parent_id: number | null;
+  anchor_start: string | null;
+  anchor_end: string | null;
+  quote: string | null;
+  resolved_at: string | null;
+  resolved_by: string | null;
+  [column: string]: SqlStorageValue;
+}
+
+interface ProposalRow {
+  id: number;
+  created_at: string;
+  requested_by: string;
+  instruction: string;
+  summary: string;
+  changes: string; // JSON: StoredChange[]
+  status: Proposal["status"];
+  decided_by: string | null;
+  decided_at: string | null;
+  [column: string]: SqlStorageValue;
+}
+
+/** A proposed change as stored: where (relative positions) and what. */
+type StoredChange = Omit<ProposalChange, "applicable">;
 
 /** Who is asking, about which document. */
 interface Caller {
@@ -174,6 +217,25 @@ export class DocCell extends DurableObject<Env> {
       author     TEXT NOT NULL,
       body       TEXT NOT NULL
     )`);
+    // Threads and replies: a reply has a parent_id; a thread may be anchored to
+    // a range of text by two Yjs relative positions.
+    addColumnIfMissing(this.sql, "comments", "parent_id", "INTEGER");
+    addColumnIfMissing(this.sql, "comments", "anchor_start", "TEXT");
+    addColumnIfMissing(this.sql, "comments", "anchor_end", "TEXT");
+    addColumnIfMissing(this.sql, "comments", "quote", "TEXT");
+    addColumnIfMissing(this.sql, "comments", "resolved_at", "TEXT");
+    addColumnIfMissing(this.sql, "comments", "resolved_by", "TEXT");
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS proposals (
+      id           INTEGER PRIMARY KEY AUTOINCREMENT,
+      created_at   TEXT NOT NULL,
+      requested_by TEXT NOT NULL,
+      instruction  TEXT NOT NULL,
+      summary      TEXT NOT NULL,
+      changes      TEXT NOT NULL,
+      status       TEXT NOT NULL,
+      decided_by   TEXT,
+      decided_at   TEXT
+    )`);
     // Stored updates that could not be read; kept for inspection, never loaded.
     this.sql.exec(`CREATE TABLE IF NOT EXISTS yjs_quarantine (
       seq            INTEGER PRIMARY KEY,
@@ -211,6 +273,23 @@ export class DocCell extends DurableObject<Env> {
       if (method === "GET") return this.listComments(caller);
       if (method === "POST") return this.addComment(request, caller);
       return notAllowed();
+    }
+    const thread = /^\/comments\/(\d+)\/(replies|resolve)$/.exec(path);
+    if (thread) {
+      if (method !== "POST") return notAllowed();
+      const id = Number(thread[1]);
+      return thread[2] === "replies" ? this.reply(request, id, caller) : this.resolve(request, id, caller);
+    }
+    if (path === "/proposals") {
+      if (method === "GET") return this.listProposals(caller);
+      if (method === "POST") return this.propose(request, caller);
+      return notAllowed();
+    }
+    const proposal = /^\/proposals\/(\d+)\/(apply|discard)$/.exec(path);
+    if (proposal) {
+      if (method !== "POST") return notAllowed();
+      const id = Number(proposal[1]);
+      return proposal[2] === "apply" ? this.applyProposal(id, caller) : this.discardProposal(id, caller);
     }
     if (path === "/versions") return method === "GET" ? this.listVersions(caller) : notAllowed();
     const version = /^\/versions\/(\d+)(\/restore)?$/.exec(path);
@@ -466,35 +545,252 @@ export class DocCell extends DurableObject<Env> {
 
   // --------------------------------------------------------------- comments
 
+  /** Every thread with its replies; readers may see them. */
   private listComments(caller: Caller): Response {
     const row = this.access(caller, "read");
     if (row instanceof Response) return row;
-    const comments = this.sql
-      .exec<{ id: number; created_at: string; author: string; body: string }>(
-        `SELECT id, created_at, author, body FROM comments ORDER BY id`,
-      )
-      .toArray()
-      .map((c): DocComment => ({ id: c.id, createdAt: c.created_at, author: c.author, body: c.body }));
-    const list: CommentList = { cell: cellInfo("doc", caller.name, this.ctx), comments };
+    const rows = this.sql.exec<CommentRow>(`SELECT * FROM comments ORDER BY id`).toArray();
+    const threads = rows
+      .filter((r) => r.parent_id === null)
+      .map(
+        (r): CommentThread => ({
+          ...toComment(r),
+          anchor: r.anchor_start && r.anchor_end ? { start: r.anchor_start, end: r.anchor_end } : null,
+          quote: r.quote,
+          resolvedAt: r.resolved_at,
+          resolvedBy: r.resolved_by,
+          replies: rows.filter((reply) => reply.parent_id === r.id).map(toComment),
+        }),
+      );
+    const list: CommentList = { cell: cellInfo("doc", caller.name, this.ctx), threads };
     return json(list);
   }
 
+  /**
+   * Starts a thread. With `anchor`, it is attached to a range of text; both
+   * positions must resolve in this cell's copy of the document (an anchor
+   * cannot point at text the server has never seen), and the quote is taken
+   * from the server's text, not from the client.
+   */
   private async addComment(request: Request, caller: Caller): Promise<Response> {
     const row = this.access(caller, "comment");
     if (row instanceof Response) return row;
     const body = await readBody(request, AddCommentRequest);
     if (body instanceof Response) return body;
-    const createdAt = new Date().toISOString();
+    let quote: string | null = null;
+    if (body.anchor) {
+      const text = this.loadYDoc().getText("body");
+      const range = positionsToRange(text, body.anchor);
+      if (!range || range.from === range.to) {
+        return errorResponse(400, "invalid_anchor", "The highlighted text is not in the saved document. Wait until it is saved, then try again.");
+      }
+      quote = text.toString().slice(range.from, range.to);
+    }
     const { id } = this.sql
       .exec<{ id: number }>(
-        `INSERT INTO comments (created_at, author, body) VALUES (?, ?, ?) RETURNING id`,
-        createdAt,
+        `INSERT INTO comments (created_at, author, body, anchor_start, anchor_end, quote) VALUES (?, ?, ?, ?, ?, ?) RETURNING id`,
+        new Date().toISOString(),
         caller.user,
         body.body,
+        body.anchor?.start ?? null,
+        body.anchor?.end ?? null,
+        quote,
       )
       .one();
-    const comment: DocComment = { id, createdAt, author: caller.user, body: body.body };
-    return json(comment, 201);
+    this.notifyChanged("comments");
+    return json(toComment(this.sql.exec<CommentRow>(`SELECT * FROM comments WHERE id = ?`, id).one()), 201);
+  }
+
+  private async reply(request: Request, threadId: number, caller: Caller): Promise<Response> {
+    const row = this.access(caller, "comment");
+    if (row instanceof Response) return row;
+    const body = await readBody(request, ReplyRequest);
+    if (body instanceof Response) return body;
+    if (!this.threadExists(threadId)) return errorResponse(404, "thread_not_found", `Thread ${threadId} does not exist.`);
+    const { id } = this.sql
+      .exec<{ id: number }>(
+        `INSERT INTO comments (created_at, author, body, parent_id) VALUES (?, ?, ?, ?) RETURNING id`,
+        new Date().toISOString(),
+        caller.user,
+        body.body,
+        threadId,
+      )
+      .one();
+    this.notifyChanged("comments");
+    return json(toComment(this.sql.exec<CommentRow>(`SELECT * FROM comments WHERE id = ?`, id).one()), 201);
+  }
+
+  /** Resolves (or, with `resolved: false`, reopens) a thread. */
+  private async resolve(request: Request, threadId: number, caller: Caller): Promise<Response> {
+    const row = this.access(caller, "comment");
+    if (row instanceof Response) return row;
+    const body = await readBody(request, ResolveRequest);
+    if (body instanceof Response) return body;
+    if (!this.threadExists(threadId)) return errorResponse(404, "thread_not_found", `Thread ${threadId} does not exist.`);
+    this.sql.exec(
+      `UPDATE comments SET resolved_at = ?, resolved_by = ? WHERE id = ?`,
+      body.resolved ? new Date().toISOString() : null,
+      body.resolved ? caller.user : null,
+      threadId,
+    );
+    this.notifyChanged("comments");
+    return this.listComments(caller);
+  }
+
+  private threadExists(id: number): boolean {
+    return this.sql.exec(`SELECT 1 FROM comments WHERE id = ? AND parent_id IS NULL`, id).toArray().length > 0;
+  }
+
+  /** Tells every open page that comments or proposals changed, so it reloads them. */
+  private notifyChanged(topic: ChangeTopic): void {
+    const message = changedMessage(topic);
+    for (const ws of this.ctx.getWebSockets()) sendTo(ws, message);
+  }
+
+  // -------------------------------------------------------------- proposals
+
+  private listProposals(caller: Caller): Response {
+    const row = this.access(caller, "read");
+    if (row instanceof Response) return row;
+    const rows = this.sql.exec<ProposalRow>(`SELECT * FROM proposals ORDER BY id DESC`).toArray();
+    const list: ProposalList = { cell: cellInfo("doc", caller.name, this.ctx), proposals: rows.map((r) => this.toProposal(r)) };
+    return json(list);
+  }
+
+  /**
+   * Asks the simulated agent for a change and stores it as a pending
+   * proposal. Each changed range is stored with Yjs relative positions, so
+   * it can still be found after others edit elsewhere. Commenters may ask;
+   * only editors may apply.
+   */
+  private async propose(request: Request, caller: Caller): Promise<Response> {
+    const row = this.access(caller, "comment");
+    if (row instanceof Response) return row;
+    const ask = await readBody(request, ProposalRequest);
+    if (ask instanceof Response) return ask;
+    const text = this.loadYDoc().getText("body");
+    const base = text.toString();
+    const { proposed, instruction } = simulateAgent(base, ask);
+    const changes: StoredChange[] = computeChanges(base, proposed).map((change) => ({
+      ...rangeToPositions(text, change.start, change.end),
+      original: change.original,
+      replacement: change.replacement,
+      before: base.slice(Math.max(0, change.start - CHANGE_CONTEXT), change.start),
+      after: base.slice(change.end, change.end + CHANGE_CONTEXT),
+    }));
+    if (changes.length === 0) return errorResponse(422, "no_changes", "The agent found nothing to change.");
+    const summary = `${changes.length} change${changes.length === 1 ? "" : "s"}`;
+    const { id } = this.sql
+      .exec<{ id: number }>(
+        `INSERT INTO proposals (created_at, requested_by, instruction, summary, changes, status) VALUES (?, ?, ?, ?, ?, 'pending') RETURNING id`,
+        new Date().toISOString(),
+        caller.user,
+        instruction,
+        summary,
+        JSON.stringify(changes),
+      )
+      .one();
+    this.notifyChanged("proposals");
+    return json(this.toProposal(this.sql.exec<ProposalRow>(`SELECT * FROM proposals WHERE id = ?`, id).one()), 201);
+  }
+
+  /**
+   * Applies a pending proposal to the document as it is *now*. Each change is
+   * found through its relative positions and replaced only if its original
+   * text is still there; then all of them are applied in one Yjs edit, so
+   * edits others made elsewhere are kept. If any change's text was edited
+   * meanwhile, nothing is applied (409) and the proposal stays pending.
+   * The text before applying is kept as a version, so it can be undone.
+   */
+  private applyProposal(id: number, caller: Caller): Response {
+    const current = this.access(caller, "edit");
+    if (current instanceof Response) return current;
+    const proposal = this.sql.exec<ProposalRow>(`SELECT * FROM proposals WHERE id = ?`, id).toArray()[0];
+    if (!proposal) return errorResponse(404, "proposal_not_found", `Proposal ${id} does not exist.`);
+    if (proposal.status !== "pending") return errorResponse(409, "proposal_decided", `Proposal ${id} was already ${proposal.status}.`);
+
+    const ydoc = this.loadYDoc();
+    const text = ydoc.getText("body");
+    const changes = JSON.parse(proposal.changes) as StoredChange[];
+    const located = changes.map((change) => ({ change, range: this.locate(text, change) }));
+    const conflicts = located.filter((l) => !l.range).map((l) => l.change.original || "(insertion)");
+    if (conflicts.length > 0) {
+      return errorResponse(
+        409,
+        "proposal_conflict",
+        `${conflicts.length} of ${changes.length} change(s) no longer fit: that text was edited after the proposal. Nothing was applied.`,
+      );
+    }
+
+    this.actor = caller.user;
+    this.ctx.storage.transactionSync(() => {
+      this.addVersion("proposal", current.title, current.body, caller.user);
+      ydoc.transact(() => {
+        // From the end backwards, so earlier offsets stay valid.
+        for (const { change, range } of [...located].sort((a, b) => b.range!.from - a.range!.from)) {
+          text.delete(range!.from, range!.to - range!.from);
+          text.insert(range!.from, change.replacement);
+        }
+      }, SERVER_ORIGIN);
+      this.sql.exec(`UPDATE doc SET revision = revision + 1, updated_at = ? WHERE id = 1`, new Date().toISOString());
+      this.sql.exec(
+        `UPDATE proposals SET status = 'applied', decided_by = ?, decided_at = ? WHERE id = ?`,
+        caller.user,
+        new Date().toISOString(),
+        id,
+      );
+      this.noteEditor(caller.user);
+    });
+    this.actor = null;
+    this.notifyChanged("proposals");
+    return json(this.toState(this.loadRow()!, caller));
+  }
+
+  /** Discards a pending proposal: editors, or whoever asked for it. */
+  private discardProposal(id: number, caller: Caller): Response {
+    const row = this.access(caller, "read");
+    if (row instanceof Response) return row;
+    const proposal = this.sql.exec<ProposalRow>(`SELECT * FROM proposals WHERE id = ?`, id).toArray()[0];
+    if (!proposal) return errorResponse(404, "proposal_not_found", `Proposal ${id} does not exist.`);
+    if (proposal.status !== "pending") return errorResponse(409, "proposal_decided", `Proposal ${id} was already ${proposal.status}.`);
+    const editor = allows(roleOf(caller.user, permissionsOf(row)), "edit");
+    if (!editor && proposal.requested_by !== caller.user) {
+      return errorResponse(403, "forbidden", `${caller.user} may not discard proposal ${id}.`);
+    }
+    this.sql.exec(
+      `UPDATE proposals SET status = 'discarded', decided_by = ?, decided_at = ? WHERE id = ?`,
+      caller.user,
+      new Date().toISOString(),
+      id,
+    );
+    this.notifyChanged("proposals");
+    return json(this.toProposal(this.sql.exec<ProposalRow>(`SELECT * FROM proposals WHERE id = ?`, id).one()));
+  }
+
+  /** Where a stored change is now, or null if its original text is no longer there. */
+  private locate(text: Y.Text, change: StoredChange): { from: number; to: number } | null {
+    const range = positionsToRange(text, change);
+    if (!range) return null;
+    return text.toString().slice(range.from, range.to) === change.original ? range : null;
+  }
+
+  private toProposal(row: ProposalRow): Proposal {
+    const text = row.status === "pending" ? this.loadYDoc().getText("body") : null;
+    return {
+      id: row.id,
+      createdAt: row.created_at,
+      requestedBy: row.requested_by,
+      agent: "simulated",
+      instruction: row.instruction,
+      summary: row.summary,
+      status: row.status,
+      decidedBy: row.decided_by,
+      decidedAt: row.decided_at,
+      changes: (JSON.parse(row.changes) as StoredChange[]).map((change) => ({
+        ...change,
+        applicable: text !== null && this.locate(text, change) !== null,
+      })),
+    };
   }
 
   // --------------------------------------------------------------- versions
@@ -855,4 +1151,8 @@ function closeSocket(ws: WebSocket, code: number, reason?: string): void {
   } catch {
     // Already closed.
   }
+}
+
+function toComment(row: CommentRow): DocComment {
+  return { id: row.id, createdAt: row.created_at, author: row.author, body: row.body };
 }
