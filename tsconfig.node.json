@@ -1,4 +1,4 @@
-// Code that runs in Node.js: build/test configuration and the restart test.
+// Code that runs in Node.js: build/test configuration and the integration tests.
 {
   "extends": "./tsconfig.base.json",
   "compilerOptions": {

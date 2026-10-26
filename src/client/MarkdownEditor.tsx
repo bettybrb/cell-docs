@@ -1,54 +1,114 @@
 import { markdown } from "@codemirror/lang-markdown";
-import { EditorView } from "@codemirror/view";
+import { Compartment, EditorState } from "@codemirror/state";
+import { EditorView, keymap } from "@codemirror/view";
 import { basicSetup } from "codemirror";
 import { useEffect, useRef } from "react";
+import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
+import type { Awareness } from "y-protocols/awareness";
+import type * as Y from "yjs";
+import { commentHighlights, setHighlights, type Highlight } from "./comment-highlights";
 
-interface Props {
-  value: string;
-  onChange: (value: string) => void;
+/** Holds the read-only setting so it can change without rebuilding the editor. */
+const readOnlySetting = new Compartment();
+
+const readOnlyExtension = (readOnly: boolean) => [EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly)];
+
+/**
+ * Creates a CodeMirror 6 Markdown editor bound to `text`. The binding keeps
+ * the two in step: edits in the editor are applied to the Y.Text, and changes
+ * to the Y.Text appear in the editor. With `awareness`, other collaborators'
+ * cursors and selections are shown too. A read-only editor still shows
+ * others' changes live.
+ */
+export function createMarkdownEditor(
+  parent: Element,
+  text: Y.Text,
+  awareness: Awareness | null = null,
+  readOnly = false,
+  onSelection?: (from: number, to: number) => void,
+): EditorView {
+  return new EditorView({
+    parent,
+    doc: text.toString(),
+    extensions: [
+      // Yjs undo/redo takes precedence over basicSetup's own history keys.
+      keymap.of(yUndoManagerKeymap),
+      basicSetup,
+      markdown(),
+      EditorView.lineWrapping,
+      yCollab(text, awareness),
+      readOnlySetting.of(readOnlyExtension(readOnly)),
+      commentHighlights(text),
+      EditorView.updateListener.of((update) => {
+        if (update.selectionSet && onSelection) {
+          const { from, to } = update.state.selection.main;
+          onSelection(from, to);
+        }
+      }),
+    ],
+  });
+}
+
+/** Switches an editor between editable and read-only in place. */
+export function setReadOnly(view: EditorView, readOnly: boolean): void {
+  view.dispatch({ effects: readOnlySetting.reconfigure(readOnlyExtension(readOnly)) });
 }
 
 /**
- * CodeMirror 6 editor with Markdown highlighting, used like a controlled
- * <textarea>: the parent owns `value`, and every edit is reported through
- * `onChange`. Plain text in, plain text out; nothing collaborative yet.
+ * React wrapper. A new Y.Text (a different document) gets a new editor, so
+ * content and undo history never carry over between documents. `readOnly`
+ * can change while the document is open (for example when an owner takes
+ * away this user's edit right).
  */
-export function MarkdownEditor({ value, onChange }: Props) {
+export function MarkdownEditor({
+  text,
+  awareness = null,
+  readOnly = false,
+  highlights = [],
+  onSelection,
+  reveal,
+}: {
+  text: Y.Text;
+  awareness?: Awareness | null;
+  readOnly?: boolean;
+  /** Commented ranges to highlight (they follow their text as it is edited). */
+  highlights?: Highlight[];
+  /** Told the selection whenever it changes (offsets in the text). */
+  onSelection?: (from: number, to: number) => void;
+  /** Selects and scrolls to this range; a new object each time it should happen. */
+  reveal?: { from: number; to: number } | null;
+}) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
-  const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
+  const selectionListener = useRef(onSelection);
+  selectionListener.current = onSelection;
 
-  // Create the editor once; destroy it on unmount.
   useEffect(() => {
-    const editor = new EditorView({
-      parent: host.current!,
-      doc: value,
-      extensions: [
-        basicSetup,
-        markdown(),
-        EditorView.lineWrapping,
-        EditorView.updateListener.of((update) => {
-          if (update.docChanged) onChangeRef.current(update.state.doc.toString());
-        }),
-      ],
-    });
-    view.current = editor;
+    view.current = createMarkdownEditor(host.current!, text, awareness, readOnly, (from, to) =>
+      selectionListener.current?.(from, to),
+    );
+    view.current.dispatch({ effects: setHighlights.of(highlights) });
     return () => {
-      editor.destroy();
+      view.current?.destroy();
       view.current = null;
     };
-  }, []);
+  }, [text, awareness]);
 
-  // Replace the content when the value changes from outside (e.g. loading a doc).
   useEffect(() => {
-    const editor = view.current;
-    if (!editor) return;
-    const current = editor.state.doc.toString();
-    if (value !== current) {
-      editor.dispatch({ changes: { from: 0, to: current.length, insert: value } });
-    }
-  }, [value]);
+    if (view.current) setReadOnly(view.current, readOnly);
+  }, [readOnly]);
 
-  return <div className="markdown-editor" data-testid="markdown-editor" ref={host} />;
+  useEffect(() => {
+    view.current?.dispatch({ effects: setHighlights.of(highlights) });
+  }, [highlights]);
+
+  useEffect(() => {
+    if (!view.current || !reveal) return;
+    view.current.dispatch({ selection: { anchor: reveal.from, head: reveal.to }, scrollIntoView: true });
+    view.current.focus();
+  }, [reveal]);
+
+  return (
+    <div className="markdown-editor" data-testid="markdown-editor" data-readonly={readOnly} ref={host} />
+  );
 }

@@ -1,5 +1,5 @@
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type { ApiError, DocState, WorkspaceState } from "../../src/shared/api-types";
 import { dummyBody, dummyTitle } from "../../src/shared/dummy-data";
@@ -44,9 +44,57 @@ describe("DocCell state", () => {
     expect((await api("PUT", path, { title: 42 })).status).toBe(400);
     expect((await api("PUT", path, { body: "x".repeat(100_001) })).status).toBe(400);
     expect((await api("PUT", path, ["not", "an", "object"])).status).toBe(400);
-    expect((await api("DELETE", path)).status).toBe(405);
+    expect((await api("PATCH", path)).status).toBe(405);
+    expect((await api("DELETE", path)).status).toBe(404); // nothing to move to the Recycle Bin
     // Nothing was stored by the rejected writes.
     expect((await api("GET", path)).status).toBe(404);
+  });
+});
+
+describe("request validation", () => {
+  const badRequest = async (path: string, body: unknown) => {
+    const response = await api<ApiError>("PUT", path, body);
+    expect(response.status).toBe(400);
+    return response.data.error;
+  };
+
+  it("names the failing field and rule in a one-line message", async () => {
+    const path = docPath(uniqueId("ws"), uniqueId("doc"));
+    const wrongType = await badRequest(path, { title: 42 });
+    expect(wrongType.code).toBe("invalid_body");
+    expect(wrongType.message).toBe('Expected string at ["title"]');
+
+    const tooLong = await badRequest(path, { title: "x".repeat(201) });
+    expect(tooLong.message).toBe('Expected a value with a length of at most 200 at ["title"]');
+
+    expect((await badRequest(path, {})).message).toBe("Provide at least one of: title, body.");
+    expect((await badRequest(path, ["not", "an", "object"])).message).toBe("Expected object");
+  });
+
+  it("rejects a blank or missing workspace display name", async () => {
+    const path = `/api/workspaces/${uniqueId("ws")}`;
+    expect((await badRequest(path, { displayName: "   " })).message).toBe('displayName must not be blank. at ["displayName"]');
+    expect((await badRequest(path, {})).message).toBe('Missing key at ["displayName"]');
+  });
+
+  it("reports malformed JSON separately from invalid content", async () => {
+    const response = await exports.default.fetch(`https://example.test${docPath(uniqueId("ws"), uniqueId("doc"))}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: "{not json",
+    });
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as ApiError).error.code).toBe("invalid_json");
+  });
+
+  it("ignores unknown fields, as before", async () => {
+    const created = await api<DocState>("PUT", docPath(uniqueId("ws"), uniqueId("doc")), {
+      title: "Kept",
+      colour: "ignored",
+    });
+    expect(created.status).toBe(201);
+    expect(created.data).not.toHaveProperty("colour");
+    expect(created.data.title).toBe("Kept");
   });
 });
 

@@ -60,3 +60,109 @@ button[aria-current="true"] {
 .markdown-editor .cm-scroller {
   overflow: auto;
 }
+
+.presence {
+  margin: 4px 0;
+  font-size: 0.9em;
+}
+
+.presence .dot {
+  display: inline-block;
+  width: 0.6em;
+  height: 0.6em;
+  border-radius: 50%;
+  margin-right: 0.25em;
+}
+
+.field-status {
+  opacity: 0.7;
+}
+
+.versions ul {
+  padding-left: 1em;
+}
+
+.versions .preview {
+  opacity: 0.7;
+}
+
+.notice {
+  border-left: 3px solid #d1495b;
+  padding-left: 8px;
+}
+
+.role {
+  font-weight: 600;
+}
+
+.tag {
+  display: inline-block;
+  padding: 0 6px;
+  margin-right: 4px;
+  border-radius: 8px;
+  background: #8882;
+  font-size: 0.85em;
+}
+
+.panel {
+  border: 1px solid #8884;
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+.panel summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.muted {
+  opacity: 0.7;
+  font-size: 0.9em;
+}
+
+.doc-list li {
+  margin: 2px 0;
+}
+
+.threads > li {
+  margin: 6px 0;
+  padding: 4px 6px;
+  border-left: 3px solid #edae49;
+}
+
+.threads > li[data-resolved="true"] {
+  opacity: 0.6;
+}
+
+.threads .active-thread {
+  background: #edae4922;
+}
+
+.threads .reply {
+  margin-left: 1.5em;
+}
+
+.diff pre {
+  white-space: pre-wrap;
+  margin: 4px 0;
+}
+
+.diff pre[data-applicable="false"] {
+  outline: 2px solid #d1495b;
+}
+
+.diff del {
+  background: #d1495b33;
+}
+
+.diff ins {
+  background: #66a18244;
+  text-decoration: none;
+}

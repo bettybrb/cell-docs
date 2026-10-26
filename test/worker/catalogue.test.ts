@@ -132,3 +132,36 @@ describe("registration failure", () => {
     expect(await listedIds(ws)).toEqual([doc]);
   });
 });
+
+describe("titles in the catalogue", () => {
+  const listedTitles = async (ws: string) =>
+    (await api<DocCatalogue>("GET", listPath(ws))).data.docs.map((d) => [d.docId, d.title]);
+
+  it("lists each document's title and keeps it current", async () => {
+    const ws = uniqueId("ws");
+    const doc = uniqueId("doc");
+    await api("PUT", docPath(ws, doc), { title: "First title", body: "x" });
+    expect(await listedTitles(ws)).toEqual([[doc, "First title"]]);
+
+    await api("PUT", docPath(ws, doc), { title: "Renamed" });
+    expect(await listedTitles(ws)).toEqual([[doc, "Renamed"]]);
+  });
+
+  it("adds the title column to catalogues created before titles were tracked", async () => {
+    const ws = uniqueId("ws");
+    const doc = uniqueId("doc");
+    await api("PUT", docPath(ws, doc), { title: "Kept title", body: "x" });
+    // Recreate the catalogue table as it was before this change.
+    await runInDurableObject(workspaceStub(ws), (_instance, state) => {
+      const sql = state.storage.sql;
+      sql.exec("DROP TABLE documents");
+      sql.exec("CREATE TABLE documents (doc_id TEXT PRIMARY KEY, created_at TEXT NOT NULL)");
+      sql.exec("INSERT INTO documents VALUES (?, ?)", doc, new Date().toISOString());
+    });
+    await evictDurableObject(workspaceStub(ws));
+
+    expect(await listedTitles(ws)).toEqual([[doc, null]]); // known again after the next read
+    await api("GET", docPath(ws, doc));
+    expect(await listedTitles(ws)).toEqual([[doc, "Kept title"]]);
+  });
+});

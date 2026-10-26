@@ -1,7 +1,22 @@
+import { Schema } from "effect";
+import * as Result from "effect/Result";
 import type { ApiError } from "../shared/api-types";
+import { DEFAULT_USER } from "../shared/users";
 
 /** Header the router uses to tell a cell which name it was addressed by. */
 export const CELL_NAME_HEADER = "x-cell-name";
+
+/**
+ * Header the router uses to tell a cell which test user made the request.
+ * Like CELL_NAME_HEADER it is set by the router only, never forwarded from a
+ * client.
+ */
+export const USER_HEADER = "x-user";
+
+/** The test user a request acts as (requests sent straight to a cell, as some tests do, act as the default). */
+export function requestUser(request: Request): string {
+  return request.headers.get(USER_HEADER) ?? DEFAULT_USER;
+}
 
 export function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -16,20 +31,21 @@ export function errorResponse(status: number, code: string, message: string): Re
 }
 
 /**
- * Parses a JSON object request body. Returns an error Response instead of
- * throwing so callers can `return` it directly.
+ * Parses a JSON request body and checks it against `schema`. Returns the
+ * decoded value (unknown extra fields dropped), or a 400 error Response that
+ * callers can `return` directly.
  */
-export async function readJsonObject(
-  request: Request,
-): Promise<Record<string, unknown> | Response> {
+export async function readBody<T>(request: Request, schema: Schema.Decoder<T>): Promise<T | Response> {
   let parsed: unknown;
   try {
     parsed = await request.json();
   } catch {
     return errorResponse(400, "invalid_json", "Request body must be valid JSON.");
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    return errorResponse(400, "invalid_body", "Request body must be a JSON object.");
+  const result = Schema.decodeUnknownResult(schema)(parsed);
+  if (Result.isFailure(result)) {
+    // Effect's messages span lines ("Expected string\n  at [\"title\"]"); keep one line.
+    return errorResponse(400, "invalid_body", result.failure.message.replace(/\n\s*/g, " "));
   }
-  return parsed as Record<string, unknown>;
+  return result.success;
 }

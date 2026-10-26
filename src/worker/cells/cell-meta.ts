@@ -34,3 +34,18 @@ export function cellInfo(kind: CellKind, name: string, ctx: DurableObjectState):
     sqliteBytes: ctx.storage.sql.databaseSize,
   };
 }
+
+/** Adds a column to an existing table if it is not there yet (CREATE TABLE IF NOT EXISTS never changes a table). */
+export function addColumnIfMissing(sql: SqlStorage, table: string, column: string, definition: string): void {
+  const columns = sql.exec<{ name: string }>(`PRAGMA table_info(${table})`).toArray();
+  if (!columns.some((c) => c.name === column)) sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+
+export function getMeta(sql: SqlStorage, key: string): string | null {
+  return sql.exec<{ value: string }>(`SELECT value FROM cell_meta WHERE key = ?`, key).toArray()[0]?.value ?? null;
+}
+
+export function setMeta(sql: SqlStorage, key: string, value: string | null): void {
+  if (value === null) sql.exec(`DELETE FROM cell_meta WHERE key = ?`, key);
+  else sql.exec(`INSERT INTO cell_meta (key, value) VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value`, key, value);
+}

@@ -10,9 +10,10 @@ with its own private SQLite database.
 - Everything runs locally in [workerd](https://github.com/cloudflare/workerd),
   the open-source Workers runtime. No Cloudflare account is needed.
 
-**Status:** Phase 1 (foundation) is done. Phase 2 is in progress: the document
-catalogue works; the rest of the document lifecycle and later phases are
-planned; see [Roadmap](#roadmap).
+**Status:** Phases 1, 3 and 4 are done: cells with per-cell SQLite, live
+collaborative Markdown editing with presence, and autosave, reconnect and
+recovery. From Phase 2 the document catalogue is done; deleting and renaming
+documents are not. See [Roadmap](#roadmap).
 Design notes are in [docs/architecture.md](docs/architecture.md).
 
 ## Requirements
@@ -39,9 +40,10 @@ Delete that folder to start from an empty state.
 |---|---|
 | `npm run dev` | Vite + Worker + Durable Objects on http://localhost:5180 |
 | `npm run typecheck` | Generates Worker types, then type-checks the client, Worker and Node code |
-| `npm test` | Tests that run inside workerd: routing, addressing, isolation, eviction/restart |
-| `npm run test:integration` | Starts the real dev server, writes data, kills it (`SIGTERM` and `SIGKILL`), restarts it and reads the data back |
-| `npm run test:all` | Typecheck + both test suites |
+| `npm test` | Tests inside workerd (routing, addressing, isolation, eviction/restart) and client tests with happy-dom (editor ↔ Y.Text binding) |
+| `npm run test:integration` | Starts the real dev server: restart persistence (`SIGTERM` and `SIGKILL`) and live sync between two clients |
+| `npm run test:e2e` | Playwright (Chromium) with two independent browsers: live sync, presence, reconnection, backend restart. First time: `npx playwright install chromium` |
+| `npm run test:all` | Typecheck + all test suites |
 | `npm run demo` | End-to-end demo with generated data against a running dev server |
 | `npm run build` | Production build into `dist/` (nothing is deployed) |
 
@@ -51,8 +53,27 @@ Delete that folder to start from an empty state.
 |---|---|---|
 | `GET` | `/api/health` | none (answered by the router) |
 | `GET` / `PUT` | `/api/workspaces/:workspaceId` | `WorkspaceCell` named `workspace:<workspaceId>` |
-| `GET` | `/api/workspaces/:workspaceId/docs` | `WorkspaceCell` (the document catalogue) |
-| `GET` / `PUT` | `/api/workspaces/:workspaceId/docs/:docId` | `DocCell` named `doc:<workspaceId>/<docId>`, then `WorkspaceCell` to register it |
+| `GET` | `/api/workspaces/:workspaceId/docs` | `WorkspaceCell`: documents you may read, with folders and tags |
+| `GET` | `/api/workspaces/:workspaceId/search?q=&tag=&folder=` | `WorkspaceCell`: search titles, text and tags |
+| `GET` | `/api/workspaces/:workspaceId/trash` | `WorkspaceCell`: the Recycle Bin |
+| `POST` / `DELETE` | `/api/workspaces/:workspaceId/folders[/:folderId]` | `WorkspaceCell`: create a folder / delete an empty one |
+| `GET` / `PUT` / `DELETE` | `/api/workspaces/:workspaceId/docs/:docId` | `DocCell` named `doc:<workspaceId>/<docId>`, then `WorkspaceCell` to register it. `DELETE` moves it to the Recycle Bin |
+| `PUT` | `/api/workspaces/:workspaceId/docs/:docId/meta` | `WorkspaceCell`: folder and tags |
+| `POST` | `/api/workspaces/:workspaceId/docs/:docId/restore` | `DocCell`: out of the Recycle Bin |
+| `POST` | `/api/workspaces/:workspaceId/docs/:docId/purge` | `DocCell`: delete for good now (owner) |
+| `PUT` | `/api/workspaces/:workspaceId/docs/:docId/permissions` | `DocCell`: default role and per-user roles (owner) |
+| `GET` / `POST` | `/api/workspaces/:workspaceId/docs/:docId/comments` | `DocCell`: comment threads (optionally anchored to text) |
+| `POST` | `/api/workspaces/:workspaceId/docs/:docId/comments/:id/replies` and `/resolve` | `DocCell`: reply; resolve or reopen |
+| `GET` / `POST` | `/api/workspaces/:workspaceId/docs/:docId/proposals` | `DocCell`: list proposals / ask the simulated agent |
+| `POST` | `/api/workspaces/:workspaceId/docs/:docId/proposals/:id/apply` and `/discard` | `DocCell` (then `WorkspaceCell` after apply): review a proposal |
+| `GET` (WebSocket) | `/api/workspaces/:workspaceId/docs/:docId/sync` | `DocCell`: live Yjs sync of the body (existing docs only) |
+| `GET` | `/api/workspaces/:workspaceId/docs/:docId/versions[/:id]` | `DocCell`: versions, newest first / one version's full text |
+| `POST` | `/api/workspaces/:workspaceId/docs/:docId/versions/:id/restore` | `DocCell`, then `WorkspaceCell`: restore title and body |
+
+Every request acts as a **test user**: `alice`, `bob` or `carol`, named in
+the `x-test-user` header (or `?user=` on the WebSocket); requests that name
+none act as `alice`. In the browser, add `?user=bob` to the page URL or use
+the switcher at the top. This is for testing permissions, not a login.
 
 Ids use lowercase letters, digits and dashes (1–63 characters).
 `GET` returns `404` until the resource has been written once. The document
@@ -84,17 +105,40 @@ curl localhost:5180/api/workspaces/demo/docs/intro
    it again. Each cell's database is a separate file under
    `.wrangler/state/v3/do/cell-docs-lab-DocCell/<id>.sqlite`, and you can read
    it with `sqlite3 -readonly <file> "SELECT * FROM doc"`.
+5. **Collaboration:** open the same doc in two browser windows (or one normal
+   and one private window). Typing in one appears in the other; the line above
+   the editor shows "● Connected", whether your edits are saved, and who is
+   here. Click **Go offline** in one window: it shows "Offline (simulated)"
+   and "Not saved yet", stays editable, asks before you close the tab, and
+   the other window sees it leave. Click **Go back online**: the edits made
+   meanwhile appear in both and the status returns to "All changes saved".
+   Stopping `npm run dev` (press `q` then Enter in its terminal) and starting
+   it again does the same for both windows at once.
+6. **Recovery:**
+   - *Offline edits survive closing the tab:* click **Go offline**, type,
+     close the tab (choose **Leave**), open the doc again: the text is back
+     and the status goes from "Saving…" to "All changes saved".
+   - *Undo a bad edit:* click **Save doc**, delete most of the text, open
+     **Versions** and click **Restore** on the "Saved" entry. Every open
+     window gets the text back; the "Before a restore" entry undoes it.
+   - *Title autosave:* change the title; within a second it says "Saved"
+     and the document list shows the new title.
+7. **Documents and permissions:** see "Testing documents, permissions and the
+   Recycle Bin by hand" in [docs/architecture.md](docs/architecture.md).
 
 ## Project layout
 
 ```
 src/worker/index.ts            stateless router (Worker entry point)
+src/worker/register-doc.ts     catalogue registration: typed errors, retry, timeout (Effect)
 src/worker/addressing.ts       resource → cell name rules
-src/worker/cells/              WorkspaceCell, DocCell, shared cell bookkeeping
-src/shared/                    API types and dummy-data generator
-src/client/                    React page
+src/worker/cells/              WorkspaceCell, DocCell, Yjs sync protocol, cell bookkeeping
+src/shared/                    API types and schemas, save-check message, dummy data
+src/client/                    React page: editor, live session, presence, versions
 test/worker/                   tests that run inside workerd
-test/integration/              restart test against the real dev server
+test/client/                   frontend tests (happy-dom)
+test/integration/              restart and live-sync tests against the real dev server
+test/e2e/                      Playwright tests with two browsers (sync, presence, recovery)
 scripts/demo.ts                command-line demo
 wrangler.jsonc                 bindings and SQLite migrations
 ```
@@ -103,19 +147,38 @@ wrangler.jsonc                 bindings and SQLite migrations
 
 1. Foundation: router, cells, per-cell SQLite, tests ✅
 2. Resource catalogue ✅ and document lifecycle
-3. Collaborative Markdown editing (Yjs, CodeMirror 6, WebSockets) and presence
-4. Autosave, reconnect and recovery
+3. Collaborative Markdown editing (Yjs, CodeMirror 6, WebSockets) and presence ✅
+4. Autosave, reconnect and recovery ✅
 5. Compatibility testing with the open-source celld runtime
 6. Documentation, CI and handover
 
 ## Known limitations
 
-- No authentication: anyone who can reach the server can read and write any cell.
+- No authentication: the test user is whatever the request says, so the
+  permissions show how enforcement works but protect nothing. Anyone who can
+  reach the server can act as any test user.
 - Reading a resource that was never written still creates an empty database
   file for that cell, because the cell creates its tables when it starts.
-- Document bodies are plain text, and the last write wins. Real-time
-  collaboration is planned for Phase 3.
+- Opening a document connects it to live sync, so body edits are saved and
+  shared without pressing Save. The title saves itself about a second after
+  you stop typing, but it is not live: other browsers see a new title when
+  they reload or reopen the document, and the last title saved wins.
+  `revision` counts saves (including title autosaves), not live body edits.
+- The body length limit (100,000 characters) is only checked on `PUT`, not on
+  live edits.
+- A reader's *delete-only* change on the live connection is dropped silently
+  rather than refused (their editor is read-only, so this only happens with
+  a modified client). Anything that adds text is refused and disconnects.
+- Search matches substrings in the catalogue's copy of each document, which
+  follows live edits within about 2 seconds.
+- The agent is simulated (deterministic tidy, summary and replace); no AI
+  model is involved. Proposed changes are whole lines, so a proposal no
+  longer applies once someone edits one of its lines (edits to other lines
+  are fine).
+- Edits made offline are kept in the browser (IndexedDB) and synced the next
+  time the document is opened online, but a document cannot be *opened*
+  while offline. Local copies are never cleaned up automatically.
 - Only verified locally. Nothing has been deployed to Cloudflare.
-- The client bundle is about 830 kB (about 270 kB gzipped), mostly CodeMirror
-  and the language packages that `@codemirror/lang-markdown` pulls in, so
+- The client bundle is about 940 kB (about 310 kB gzipped), mostly CodeMirror,
+  the language packages that `@codemirror/lang-markdown` pulls in, and Yjs, so
   `npm run build` warns about chunk size. Loading the editor lazily is deferred.
