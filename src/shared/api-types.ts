@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { ROLES, type DocPermissions, type EffectiveRole } from "./permissions";
 
 /**
  * JSON shapes exchanged between the browser and the Worker.
@@ -31,20 +32,74 @@ export interface DocState {
   workspaceId: string;
   docId: string;
   title: string;
-  /** Plain text for now; becomes collaborative Markdown in a later phase. */
+  /** Markdown text. */
   body: string;
   /** Increments on every successful write. */
   revision: number;
   createdAt: string;
   updatedAt: string;
+  permissions: DocPermissions;
+  /** The role of the user who made this request. */
+  yourRole: EffectiveRole;
+  /** Set while the document is in the Recycle Bin. */
+  deletedAt: string | null;
+  deletedBy: string | null;
+  /** When a document in the Recycle Bin is deleted for good. */
+  purgeAt: string | null;
 }
 
-/** The documents registered in a workspace's catalogue, oldest first. */
+export interface Folder {
+  id: string;
+  name: string;
+  parentId: string | null;
+  createdAt: string;
+}
+
+/** A document as the workspace catalogue knows it (copies refreshed from its DocCell). */
+export interface CatalogueEntry {
+  docId: string;
+  createdAt: string;
+  updatedAt: string | null;
+  /** null until the doc is next read or saved (entries older than title copies). */
+  title: string | null;
+  owner: string | null;
+  yourRole: EffectiveRole;
+  folderId: string | null;
+  tags: string[];
+}
+
+/** The documents the requesting user may read, oldest first, with folders and tags. */
 export interface DocCatalogue {
   cell: CellInfo;
   workspaceId: string;
-  /** `title` is a copy, refreshed whenever the doc is read or saved; null if not known yet. */
-  docs: { docId: string; createdAt: string; title: string | null }[];
+  docs: CatalogueEntry[];
+  folders: Folder[];
+  /** Every tag in use, for reuse, with how many readable documents carry it. */
+  tags: { name: string; count: number }[];
+}
+
+export interface TrashEntry extends CatalogueEntry {
+  deletedAt: string;
+  deletedBy: string | null;
+  purgeAt: string | null;
+}
+
+export interface TrashList {
+  cell: CellInfo;
+  docs: TrashEntry[]; // most recently deleted first
+}
+
+export interface SearchResult extends CatalogueEntry {
+  /** Where the query matched. */
+  matchedIn: ("title" | "content" | "tags")[];
+  /** Text around the first content match, if any. */
+  snippet: string | null;
+}
+
+export interface SearchResults {
+  cell: CellInfo;
+  query: string;
+  results: SearchResult[];
 }
 
 /*
@@ -82,10 +137,31 @@ export interface DocVersion {
   createdAt: string;
   /** "save": a manual save. "auto": before live edits, at most every 5 minutes. "restore": before a restore. */
   reason: "save" | "auto" | "restore";
+  /** Who caused this version: the saver, the editor who started a new burst of edits, or the restorer. */
+  createdBy: string | null;
+  /** Who changed the document between the previous version and this one. */
+  editors: string[];
   title: string;
   /** The first characters of the body. */
   preview: string;
   length: number;
+}
+
+export interface DocVersionDetail extends DocVersion {
+  cell: CellInfo;
+  body: string;
+}
+
+export interface DocComment {
+  id: number;
+  createdAt: string;
+  author: string;
+  body: string;
+}
+
+export interface CommentList {
+  cell: CellInfo;
+  comments: DocComment[]; // oldest first
 }
 
 export interface DocVersionList {
@@ -102,3 +178,41 @@ export interface HealthResponse {
 export interface ApiError {
   error: { code: string; message: string };
 }
+
+export const MAX_COMMENT_LENGTH = 2_000;
+export const MAX_FOLDER_NAME_LENGTH = 60;
+export const MAX_TAGS = 10;
+
+const RoleSchema = Schema.Literals(ROLES);
+const nonBlank = (field: string) =>
+  Schema.makeFilter((value: string) => value.trim() !== "", { message: `${field} must not be blank.` });
+
+/** The owner's choice: a default role for everyone, plus roles for specific users. */
+export const UpdatePermissionsRequest = Schema.Struct({
+  defaultRole: RoleSchema,
+  users: Schema.Record(Schema.String, RoleSchema),
+});
+export type UpdatePermissionsRequest = typeof UpdatePermissionsRequest.Type;
+
+export const AddCommentRequest = Schema.Struct({
+  body: Schema.String.check(Schema.isMaxLength(MAX_COMMENT_LENGTH), nonBlank("body")),
+});
+export type AddCommentRequest = typeof AddCommentRequest.Type;
+
+export const CreateFolderRequest = Schema.Struct({
+  name: Schema.String.check(Schema.isMaxLength(MAX_FOLDER_NAME_LENGTH), nonBlank("name")),
+  parentId: Schema.optionalKey(Schema.NullOr(Schema.String)),
+});
+export type CreateFolderRequest = typeof CreateFolderRequest.Type;
+
+/** A tag: letters, digits, spaces, "-" or "_", up to 30 characters (stored in lower case). */
+export const Tag = Schema.String.check(
+  Schema.isPattern(/^[\p{L}\p{N}][\p{L}\p{N} _-]{0,29}$/u, { message: "Tags use letters, digits, spaces, - or _ (up to 30)." }),
+);
+
+/** Catalogue-only metadata: which folder a document is in, and its tags. */
+export const UpdateDocMetaRequest = Schema.Struct({
+  folderId: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  tags: Schema.optionalKey(Schema.Array(Tag).check(Schema.isMaxLength(MAX_TAGS))),
+});
+export type UpdateDocMetaRequest = typeof UpdateDocMetaRequest.Type;

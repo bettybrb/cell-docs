@@ -1,9 +1,22 @@
 import { Schema } from "effect";
 import * as Result from "effect/Result";
 import type { ApiError } from "../shared/api-types";
+import { DEFAULT_USER } from "../shared/users";
 
 /** Header the router uses to tell a cell which name it was addressed by. */
 export const CELL_NAME_HEADER = "x-cell-name";
+
+/**
+ * Header the router uses to tell a cell which test user made the request.
+ * Like CELL_NAME_HEADER it is set by the router only, never forwarded from a
+ * client.
+ */
+export const USER_HEADER = "x-user";
+
+/** The test user a request acts as (requests sent straight to a cell, as some tests do, act as the default). */
+export function requestUser(request: Request): string {
+  return request.headers.get(USER_HEADER) ?? DEFAULT_USER;
+}
 
 export function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {

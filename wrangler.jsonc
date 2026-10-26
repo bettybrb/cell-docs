@@ -30,5 +30,10 @@
     { "tag": "v1", "new_sqlite_classes": ["WorkspaceCell", "DocCell"] }
   ],
 
+  // How long a deleted document stays in the Recycle Bin before it is erased
+  // (30 days). Override it in .dev.vars, e.g. TRASH_RETENTION_MS=60000, to
+  // watch permanent deletion happen while testing by hand.
+  "vars": { "TRASH_RETENTION_MS": "2592000000" },
+
   "observability": { "enabled": true }
 }

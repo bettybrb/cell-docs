@@ -1,7 +1,7 @@
 import * as decoding from "lib0/decoding";
 import * as encoding from "lib0/encoding";
 import * as syncProtocol from "y-protocols/sync";
-import type * as Y from "yjs";
+import * as Y from "yjs";
 
 /**
  * The parts of the standard Yjs WebSocket protocol (as spoken by the
@@ -111,4 +111,29 @@ export function awarenessMessage(entries: PresenceEntry[]): Uint8Array {
   encoding.writeVarUint(encoder, MESSAGE_AWARENESS);
   encoding.writeVarUint8Array(encoder, encoding.toUint8Array(update));
   return encoding.toUint8Array(encoder);
+}
+
+/**
+ * For a sync message that carries document changes (sync step 2 or an
+ * update), whether applying it would add content. Used to keep users without
+ * edit rights from changing the document: a reader's normal messages (asking
+ * for state, or answering with nothing new) add nothing.
+ *
+ * Only added content counts; a delete-only change from a reader is ignored
+ * rather than rejected (see DocCell.webSocketMessage).
+ */
+export function addsContent(data: Uint8Array): boolean {
+  const decoder = decoding.createDecoder(data);
+  if (decoding.readVarUint(decoder) !== MESSAGE_SYNC) return false;
+  const kind = decoding.readVarUint(decoder);
+  if (kind !== syncProtocol.messageYjsSyncStep2 && kind !== syncProtocol.messageYjsUpdate) return false;
+  return Y.decodeUpdate(decoding.readVarUint8Array(decoder)).structs.length > 0;
+}
+
+/** Whether a sync message carries document changes (step 2 or update) rather than a request for them. */
+export function carriesChanges(data: Uint8Array): boolean {
+  const decoder = decoding.createDecoder(data);
+  if (decoding.readVarUint(decoder) !== MESSAGE_SYNC) return false;
+  const kind = decoding.readVarUint(decoder);
+  return kind === syncProtocol.messageYjsSyncStep2 || kind === syncProtocol.messageYjsUpdate;
 }
