@@ -1,11 +1,27 @@
 import { useEffect, useState } from "react";
 import type { Awareness } from "y-protocols/awareness";
-import type { Collaborator, ConnectedDocSession, ConnectionStatus } from "./doc-session";
+import type { EffectiveRole } from "../shared/permissions";
+import type { ClosedReason, Collaborator, ConnectedDocSession, ConnectionStatus } from "./doc-session";
 
 const STATUS_TEXT: Record<ConnectionStatus, string> = {
   connecting: "○ Connecting…",
   connected: "● Connected",
   disconnected: "○ Offline, reconnecting…",
+};
+
+export const ROLE_TEXT: Record<EffectiveRole, string> = {
+  owner: "Owner",
+  edit: "Can edit",
+  comment: "Can comment (read-only text)",
+  read: "Read only",
+  none: "No access",
+};
+
+const CLOSED_TEXT: Record<ClosedReason, string> = {
+  access_revoked: "Your access to this document was removed.",
+  edit_rejected:
+    "Your last change was refused: you may no longer edit this document. It was not saved. Reload the document to keep reading.",
+  document_deleted: "This document was moved to the Recycle Bin.",
 };
 
 type SaveState = "saved" | "saving" | "unsaved";
@@ -21,6 +37,8 @@ export function PresenceBar({ session }: { session: ConnectedDocSession }) {
   const [status, setStatus] = useState(session.status());
   const [unsaved, setUnsaved] = useState(session.unsavedChanges());
   const [offline, setOffline] = useState(session.offline());
+  const [role, setRole] = useState(session.role());
+  const [closed, setClosed] = useState(session.closedReason());
   const [people, setPeople] = useState(() => collaborators(session.awareness));
 
   useEffect(() => {
@@ -29,6 +47,8 @@ export function PresenceBar({ session }: { session: ConnectedDocSession }) {
       setStatus(session.status());
       setUnsaved(session.unsavedChanges());
       setOffline(session.offline());
+      setRole(session.role());
+      setClosed(session.closedReason());
     };
     session.awareness.on("change", updatePeople);
     const stop = session.subscribe(updateStatus);
@@ -42,8 +62,24 @@ export function PresenceBar({ session }: { session: ConnectedDocSession }) {
 
   const saveState: SaveState = unsaved === 0 ? "saved" : status === "connected" ? "saving" : "unsaved";
 
+  if (closed) {
+    return (
+      <p className="presence notice" data-testid="connection-closed" data-reason={closed}>
+        {CLOSED_TEXT[closed]}
+      </p>
+    );
+  }
+
   return (
     <p className="presence" data-testid="presence">
+      {role && (
+        <>
+          <span className="role" data-testid="your-role" data-role={role}>
+            {ROLE_TEXT[role]}
+          </span>
+          {" · "}
+        </>
+      )}
       <span data-testid="connection-status" data-status={status}>
         {offline ? "○ Offline (simulated)" : STATUS_TEXT[status]}
       </span>

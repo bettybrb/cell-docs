@@ -85,3 +85,48 @@ button[aria-current="true"] {
 .versions .preview {
   opacity: 0.7;
 }
+
+.notice {
+  border-left: 3px solid #d1495b;
+  padding-left: 8px;
+}
+
+.role {
+  font-weight: 600;
+}
+
+.tag {
+  display: inline-block;
+  padding: 0 6px;
+  margin-right: 4px;
+  border-radius: 8px;
+  background: #8882;
+  font-size: 0.85em;
+}
+
+.panel {
+  border: 1px solid #8884;
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+.panel summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.inline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.muted {
+  opacity: 0.7;
+  font-size: 0.9em;
+}
+
+.doc-list li {
+  margin: 2px 0;
+}

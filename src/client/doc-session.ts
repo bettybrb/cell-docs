@@ -3,6 +3,14 @@ import type { Awareness } from "y-protocols/awareness";
 import { IndexeddbPersistence } from "y-indexeddb";
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
+import {
+  CLOSE_ACCESS_REVOKED,
+  CLOSE_DOC_DELETED,
+  CLOSE_EDIT_REJECTED,
+  MESSAGE_ROLE,
+  readRole,
+} from "../shared/doc-messages";
+import type { EffectiveRole } from "../shared/permissions";
 import { MESSAGE_SAVE_CHECK, saveCheckMessage } from "../shared/save-check";
 
 /** How long after the last edit to ask the server to confirm it has saved. */
@@ -31,6 +39,15 @@ export function createDocSession(body: string): DocSession {
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected";
 
+/** Why the server ended the connection for good (it is not retried). */
+export type ClosedReason = "access_revoked" | "edit_rejected" | "document_deleted";
+
+const CLOSE_REASONS: Record<number, ClosedReason> = {
+  [CLOSE_ACCESS_REVOKED]: "access_revoked",
+  [CLOSE_EDIT_REJECTED]: "edit_rejected",
+  [CLOSE_DOC_DELETED]: "document_deleted",
+};
+
 /** What each browser shares about itself. `color`/`colorLight` style its cursor. */
 export interface Collaborator {
   name: string;
@@ -48,13 +65,17 @@ export interface ConnectedDocSession extends DocSession {
   unsavedChanges(): number;
   /** True while offline was switched on with setOffline (for demos and testing). */
   offline(): boolean;
+  /** This user's role on the document, as the server last announced it (null until it has). */
+  role(): EffectiveRole | null;
+  /** Set when the server ended the connection for good; the editor should stop editing. */
+  closedReason(): ClosedReason | null;
   /**
    * Drops the connection and stops reconnecting (true), or reconnects (false).
    * Behaves like a real network loss: others see this browser leave, and
    * edits wait until it is back online.
    */
   setOffline(offline: boolean): void;
-  /** Calls `listener` whenever status(), unsavedChanges() or offline() changes; returns an unsubscribe function. */
+  /** Calls `listener` whenever status(), unsavedChanges(), offline(), role() or closedReason() changes; returns an unsubscribe function. */
   subscribe(listener: () => void): () => void;
   /** Closes the connection. Call before switching documents. */
   destroy(): void;
@@ -75,10 +96,13 @@ export function connectDocSession(
   docId: string,
   {
     user = randomGuest(),
+    testUser,
     localKey,
     ...options
   }: {
     user?: Collaborator;
+    /** The test user to connect as (`?user=` on the sync URL); the server's default if omitted. */
+    testUser?: string;
     /**
      * Also keep the document in this browser's IndexedDB under this key, so
      * edits made offline survive closing the tab. Include something that
@@ -103,6 +127,7 @@ export function connectDocSession(
     // Ask the server for missed changes now and then. This also keeps the
     // connection alive: the provider reconnects after 30 s without messages.
     resyncInterval: 15_000,
+    params: testUser ? { user: testUser } : {},
     ...options,
   });
   const synced = new Promise<void>((resolve) => {
@@ -146,6 +171,26 @@ export function connectDocSession(
     if (isSynced) sendSaveCheck();
   });
 
+  // Permissions: the server announces this user's role on connect and
+  // whenever it changes, and closes the connection for good when the user
+  // may no longer use it (or the document was deleted).
+  let role: EffectiveRole | null = null;
+  let closedReason: ClosedReason | null = null;
+  provider.messageHandlers[MESSAGE_ROLE] = (_encoder, decoder) => {
+    role = readRole(decoder);
+    notify();
+  };
+  provider.on("connection-close", (event) => {
+    const reason = event ? CLOSE_REASONS[event.code] : undefined;
+    if (!reason) return;
+    closedReason = reason;
+    // Pending edits can no longer be saved; don't keep warning about them.
+    confirmedCount = editCount;
+    // A refused edit must not come back from the local copy on the next visit.
+    if (reason === "edit_rejected") void local?.clearData();
+    notify();
+  });
+
   provider.on("status", (event) => {
     status = event.status;
     if (status === "connected") {
@@ -165,6 +210,8 @@ export function connectDocSession(
     status: () => status,
     unsavedChanges: () => editCount - confirmedCount,
     offline: () => offline,
+    role: () => role,
+    closedReason: () => closedReason,
     setOffline(value) {
       offline = value;
       if (value) provider.disconnect();
