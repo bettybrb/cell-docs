@@ -2,7 +2,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import type * as Y from "yjs";
-import type { DocCatalogue, DocState, DocVersionList } from "../../src/shared/api-types";
+import type { DocCatalogue, DocState, DocVersionDetail, DocVersionList } from "../../src/shared/api-types";
 import { docCellName } from "../../src/worker/addressing";
 import { AUTO_VERSION_INTERVAL_MS, MAX_VERSIONS, type DocCell } from "../../src/worker/cells/doc-cell";
 import { api, uniqueId } from "./helpers";
@@ -90,5 +90,48 @@ describe("versions", () => {
     expect((await api("GET", `${path}/versions/1/restore`)).status).toBe(405);
     expect((await api("POST", `${path}/versions`)).status).toBe(405);
     expect((await api("POST", `${path}/versions/abc/restore`)).status).toBe(404); // no such route
+  });
+});
+
+describe("version history: who and when, preview, nothing lost", () => {
+  it("records who created each version and who edited since the previous one", async () => {
+    const [ws, doc] = [uniqueId("ws"), uniqueId("doc")];
+    const path = docPath(ws, doc);
+    await api("PUT", path, { title: "Notes", body: "v1" }, "alice");
+    await api("PUT", path, { title: "Notes by bob" }, "bob"); // title only: no version, but bob edited
+    await api("PUT", path, { body: "v2" }, "carol");
+
+    const list = await versions(path);
+    expect(list.map((v) => [v.reason, v.createdBy, v.editors, v.preview])).toEqual([
+      ["save", "carol", ["bob", "carol"], "v2"],
+      ["save", "alice", ["alice"], "v1"],
+    ]);
+    expect(Date.parse(list[0].createdAt)).toBeGreaterThanOrEqual(Date.parse(list[1].createdAt));
+  });
+
+  it("previews a version's full text", async () => {
+    const long = "x".repeat(500);
+    const { path } = await newDoc({ body: long });
+    const [version] = await versions(path);
+    expect(version.preview).toHaveLength(80);
+    const detail = await api<DocVersionDetail>("GET", `${path}/versions/${version.id}`);
+    expect(detail.status).toBe(200);
+    expect(detail.data).toMatchObject({ id: version.id, body: long, length: 500 });
+    expect((await api("GET", `${path}/versions/999999`)).status).toBe(404);
+  });
+
+  it("restores without deleting any version in between", async () => {
+    const { path } = await newDoc({ body: "one" });
+    await api("PUT", path, { body: "two" });
+    await api("PUT", path, { body: "three" });
+    const before = await versions(path);
+    const oldest = before.at(-1)!;
+
+    await api("POST", `${path}/versions/${oldest.id}/restore`, undefined, "bob");
+    const after = await versions(path);
+    expect(after.map((v) => v.id)).toEqual(expect.arrayContaining(before.map((v) => v.id)));
+    expect(after).toHaveLength(before.length + 1);
+    expect(after[0]).toMatchObject({ reason: "restore", createdBy: "bob", preview: "three" });
+    expect((await api<DocState>("GET", path)).data.body).toBe("one");
   });
 });

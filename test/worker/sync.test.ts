@@ -1,97 +1,16 @@
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import * as decoding from "lib0/decoding";
+import { closeAllClients, connect, type Client } from "./sync-client";
 import * as encoding from "lib0/encoding";
-import * as awarenessProtocol from "y-protocols/awareness";
-import * as Y from "yjs";
 import type { DocState } from "../../src/shared/api-types";
-import { isSaveCheck, readSaveCheck, saveCheckMessage } from "../../src/shared/save-check";
+import { saveCheckMessage } from "../../src/shared/save-check";
 import { docCellName } from "../../src/worker/addressing";
-import {
-  handleMessage,
-  isAwarenessMessage,
-  syncStep1Message,
-  updateMessage,
-} from "../../src/worker/cells/yjs-sync";
 import { api, uniqueId } from "./helpers";
 
 const docPath = (ws: string, doc: string) => `/api/workspaces/${ws}/docs/${doc}`;
 
-interface Client {
-  socket: WebSocket;
-  text: Y.Text;
-  awareness: awarenessProtocol.Awareness;
-  closed: Promise<CloseEvent>;
-  /** Sequence numbers of save checks the server has answered. */
-  savedChecks: number[];
-}
-
-const open: WebSocket[] = [];
-const awarenesses: awarenessProtocol.Awareness[] = [];
-
-afterEach(() => {
-  awarenesses.splice(0).forEach((awareness) => awareness.destroy());
-  for (const socket of open.splice(0)) {
-    try {
-      socket.close(1000);
-    } catch {
-      // already closed
-    }
-  }
-});
-
-/** A minimal browser stand-in: a Y.Doc synced over the same protocol y-websocket speaks. */
-async function connect(ws: string, doc: string): Promise<Client> {
-  const response = await exports.default.fetch(`https://example.test${docPath(ws, doc)}/sync`, {
-    headers: { upgrade: "websocket" },
-  });
-  expect(response.status).toBe(101);
-  const socket = response.webSocket!;
-  socket.binaryType = "arraybuffer"; // as y-websocket does in the browser
-  socket.accept();
-  open.push(socket);
-
-  const ydoc = new Y.Doc();
-  const awareness = new awarenessProtocol.Awareness(ydoc);
-  awareness.setLocalState(null); // like y-websocket: no presence until the app sets it
-  awarenesses.push(awareness);
-  const closed = new Promise<CloseEvent>((resolve) => socket.addEventListener("close", resolve));
-  const savedChecks: number[] = [];
-  const send = (data: Uint8Array) => {
-    if (socket.readyState === WebSocket.OPEN) socket.send(data);
-  };
-  socket.addEventListener("message", (event) => {
-    const data = new Uint8Array(event.data as ArrayBuffer);
-    if (isSaveCheck(data)) {
-      savedChecks.push(readSaveCheck(data));
-      return;
-    }
-    if (isAwarenessMessage(data)) {
-      const decoder = decoding.createDecoder(data);
-      decoding.readVarUint(decoder);
-      awarenessProtocol.applyAwarenessUpdate(awareness, decoding.readVarUint8Array(decoder), socket);
-      return;
-    }
-    const reply = handleMessage(data, ydoc, socket);
-    if (reply) send(reply);
-  });
-  ydoc.on("update", (update: Uint8Array, origin: unknown) => {
-    if (origin !== socket) send(updateMessage(update));
-  });
-  awareness.on("update", ({ added, updated, removed }: Record<string, number[]>, origin: unknown) => {
-    if (origin === socket) return;
-    const encoder = encoding.createEncoder();
-    encoding.writeVarUint(encoder, 1);
-    encoding.writeVarUint8Array(
-      encoder,
-      awarenessProtocol.encodeAwarenessUpdate(awareness, [...added, ...updated, ...removed]),
-    );
-    send(encoding.toUint8Array(encoder));
-  });
-  socket.send(syncStep1Message(ydoc));
-  return { socket, text: ydoc.getText("body"), awareness, closed, savedChecks };
-}
+afterEach(closeAllClients);
 
 /** Names of the *other* clients this client currently sees. */
 const othersSeenBy = (client: Client) =>

@@ -44,7 +44,8 @@ describe("DocCell state", () => {
     expect((await api("PUT", path, { title: 42 })).status).toBe(400);
     expect((await api("PUT", path, { body: "x".repeat(100_001) })).status).toBe(400);
     expect((await api("PUT", path, ["not", "an", "object"])).status).toBe(400);
-    expect((await api("DELETE", path)).status).toBe(405);
+    expect((await api("PATCH", path)).status).toBe(405);
+    expect((await api("DELETE", path)).status).toBe(404); // nothing to move to the Recycle Bin
     // Nothing was stored by the rejected writes.
     expect((await api("GET", path)).status).toBe(404);
   });
