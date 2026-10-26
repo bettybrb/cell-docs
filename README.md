@@ -62,7 +62,10 @@ Delete that folder to start from an empty state.
 | `POST` | `/api/workspaces/:workspaceId/docs/:docId/restore` | `DocCell`: out of the Recycle Bin |
 | `POST` | `/api/workspaces/:workspaceId/docs/:docId/purge` | `DocCell`: delete for good now (owner) |
 | `PUT` | `/api/workspaces/:workspaceId/docs/:docId/permissions` | `DocCell`: default role and per-user roles (owner) |
-| `GET` / `POST` | `/api/workspaces/:workspaceId/docs/:docId/comments` | `DocCell`: comments |
+| `GET` / `POST` | `/api/workspaces/:workspaceId/docs/:docId/comments` | `DocCell`: comment threads (optionally anchored to text) |
+| `POST` | `/api/workspaces/:workspaceId/docs/:docId/comments/:id/replies` and `/resolve` | `DocCell`: reply; resolve or reopen |
+| `GET` / `POST` | `/api/workspaces/:workspaceId/docs/:docId/proposals` | `DocCell`: list proposals / ask the simulated agent |
+| `POST` | `/api/workspaces/:workspaceId/docs/:docId/proposals/:id/apply` and `/discard` | `DocCell` (then `WorkspaceCell` after apply): review a proposal |
 | `GET` (WebSocket) | `/api/workspaces/:workspaceId/docs/:docId/sync` | `DocCell`: live Yjs sync of the body (existing docs only) |
 | `GET` | `/api/workspaces/:workspaceId/docs/:docId/versions[/:id]` | `DocCell`: versions, newest first / one version's full text |
 | `POST` | `/api/workspaces/:workspaceId/docs/:docId/versions/:id/restore` | `DocCell`, then `WorkspaceCell`: restore title and body |
@@ -167,8 +170,11 @@ wrangler.jsonc                 bindings and SQLite migrations
   rather than refused (their editor is read-only, so this only happens with
   a modified client). Anything that adds text is refused and disconnects.
 - Search matches substrings in the catalogue's copy of each document, which
-  follows live edits within about 2 seconds. Comments are per document, not
-  attached to a passage of text.
+  follows live edits within about 2 seconds.
+- The agent is simulated (deterministic tidy, summary and replace); no AI
+  model is involved. Proposed changes are whole lines, so a proposal no
+  longer applies once someone edits one of its lines (edits to other lines
+  are fine).
 - Edits made offline are kept in the browser (IndexedDB) and synced the next
   time the document is opened online, but a document cannot be *opened*
   while offline. Local copies are never cleaned up automatically.

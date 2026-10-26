@@ -229,6 +229,52 @@ after every document request, and the `DocCell` refreshes it about 2 seconds
 after live edits (which do not pass the router), using the same alarm as the
 Recycle Bin.
 
+## Comment threads
+
+Threads live in the `DocCell`'s SQLite (`comments`): a thread is a row
+without `parent_id`, its replies point at it. A thread can be **anchored**
+to a range of text by two **Yjs relative positions** (`anchor_start`,
+`anchor_end`, base64 of `Y.encodeRelativePosition`). A relative position
+names a place by the Yjs ids of the characters around it, not by an offset,
+so every browser turns it back into the current offsets after any edit and
+the highlight follows its text. The start sticks to the first character
+after it and the end to the last character before it, so text typed just
+outside the range stays outside. If all of the text is deleted, the range
+becomes empty; the thread stays, with the quote taken when it was started.
+
+The server checks that both positions resolve in its own copy of the
+document (an anchor cannot point at text it has never seen) and takes the
+quote from its own text. Readers see threads; commenters, editors and the
+owner can start, reply, resolve and reopen. Every change sends
+`[102, {"topic":"comments"}]` on the sync WebSocket, and open pages reload
+the threads.
+
+Why not keep threads inside the Yjs document? Commenters may not change the
+document, and the server would then have to inspect every binary update to
+tell comment changes from text changes. SQL plus relative positions keeps
+enforcement simple while the anchors still follow the shared text.
+
+## Agent proposals
+
+A **simulated agent** (`src/worker/agent.ts`: tidy, add a summary, replace)
+stands in for an AI model. Asking it (commenters and up) stores a *pending*
+proposal and changes nothing. The proposal is split into **changes of whole
+lines** (`diffLines`); each is stored with its original text, its
+replacement, a little context for the preview, and two Yjs relative
+positions for where it applies.
+
+**Applying** (editors and up) works on the document as it is *now*: each
+change is located through its relative positions and accepted only if its
+original text is still exactly there. Then all changes are applied in one
+Yjs transaction, so edits others made elsewhere since the proposal are kept,
+and every open browser receives the change live. If any change's lines were
+edited meanwhile, nothing is applied (`409 proposal_conflict`), and the
+listing marks those changes as no longer fitting; the proposal can be
+discarded (by editors or by whoever asked) and asked for again. Before
+applying, the text is kept as a "Before an agent proposal" version, so an
+applied proposal can be undone with Restore. Each proposal is applied or
+discarded at most once.
+
 ## Document catalogue
 
 Each `WorkspaceCell` keeps a `documents` table listing the docs in its
@@ -287,7 +333,10 @@ doc (id INTEGER PRIMARY KEY CHECK (id = 1), title, body, revision, created_at, u
 yjs_updates (seq INTEGER PRIMARY KEY AUTOINCREMENT, data BLOB)  -- body = merged updates
 yjs_quarantine (seq INTEGER PRIMARY KEY, data BLOB, quarantined_at)  -- unreadable updates
 doc_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at, reason, title, body, created_by, editors)  -- newest 50
-comments (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at, author, body)
+comments (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at, author, body,
+          parent_id, anchor_start, anchor_end, quote, resolved_at, resolved_by)  -- threads and replies
+proposals (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at, requested_by, instruction, summary,
+           changes, status, decided_by, decided_at)  -- changes: JSON with relative positions
 ```
 
 Columns added after a table was first created are added on startup when
@@ -389,3 +438,19 @@ Start the app with `npm run dev` and open two windows side by side, one as
    **Preview** shows an old version's full text; **Restore** brings it back
    in every open window and adds the replaced text as a new version, so
    nothing is lost.
+6. **Comments on text.** As alice, select a few words in the editor, type
+   in the comment box and click **Comment on selection**: the words are
+   highlighted in both windows. As bob, type before and after them: the
+   highlight stays on the same words. Bob can **Reply** and **Resolve**;
+   alice sees both without reloading (tick **Show resolved** to see resolved
+   threads). Delete the highlighted words: the thread says its text was
+   deleted and keeps the quote.
+7. **Agent proposals.** As alice, enter *find* and *replace with* and click
+   **Ask agent: replace** (or *tidy up*, or *add a summary*). The preview
+   shows each changed line as removed and added text; the document does not
+   change yet. As bob, edit a *different* line, then as alice click
+   **Apply**: the change lands and bob's edit stays. Ask again, and this
+   time let bob edit *the same line* first: the proposal says its change no
+   longer fits, **Apply** is disabled, and **Discard** removes it. As carol
+   with *Can comment*, asking works but **Apply** is disabled. After an
+   apply, **Versions** has a "Before an agent proposal" entry to undo it.
