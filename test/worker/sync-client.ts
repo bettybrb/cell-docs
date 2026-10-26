@@ -4,7 +4,7 @@ import * as encoding from "lib0/encoding";
 import { expect } from "vitest";
 import * as awarenessProtocol from "y-protocols/awareness";
 import * as Y from "yjs";
-import { MESSAGE_ROLE, readRole } from "../../src/shared/doc-messages";
+import { MESSAGE_CHANGED, MESSAGE_ROLE, readChangeTopic, readRole } from "../../src/shared/doc-messages";
 import { isSaveCheck, readSaveCheck } from "../../src/shared/save-check";
 import { handleMessage, isAwarenessMessage, syncStep1Message, updateMessage } from "../../src/worker/cells/yjs-sync";
 
@@ -19,6 +19,8 @@ export interface Client {
   savedChecks: number[];
   /** Roles the server has announced to this client, in order. */
   roles: string[];
+  /** Topics of "something besides the text changed" notices, in order. */
+  changes: string[];
 }
 
 const open: WebSocket[] = [];
@@ -58,6 +60,7 @@ export async function connect(ws: string, doc: string, user?: string): Promise<C
   const closed = new Promise<CloseEvent>((resolve) => socket.addEventListener("close", resolve));
   const savedChecks: number[] = [];
   const roles: string[] = [];
+  const changes: string[] = [];
   const send = (data: Uint8Array) => {
     if (socket.readyState === WebSocket.OPEN) socket.send(data);
   };
@@ -71,6 +74,10 @@ export async function connect(ws: string, doc: string, user?: string): Promise<C
     const type = decoding.readVarUint(decoder);
     if (type === MESSAGE_ROLE) {
       roles.push(readRole(decoder));
+      return;
+    }
+    if (type === MESSAGE_CHANGED) {
+      changes.push(readChangeTopic(decoder));
       return;
     }
     if (isAwarenessMessage(data)) {
@@ -94,5 +101,5 @@ export async function connect(ws: string, doc: string, user?: string): Promise<C
     send(encoding.toUint8Array(encoder));
   });
   socket.send(syncStep1Message(ydoc));
-  return { socket, text: ydoc.getText("body"), awareness, closed, savedChecks, roles };
+  return { socket, text: ydoc.getText("body"), awareness, closed, savedChecks, roles, changes };
 }

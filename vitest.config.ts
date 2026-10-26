@@ -12,7 +12,7 @@ export default defineConfig({
     projects: [
       {
         plugins: [cloudflareTest({ wrangler: { configPath: "./wrangler.jsonc" } })],
-        test: { name: "worker", include: ["test/worker/**/*.test.ts"] },
+        test: { name: "worker", include: ["test/worker/**/*.test.ts"], setupFiles: ["test/worker/setup.ts"] },
       },
       {
         test: { name: "client", include: ["test/client/**/*.test.ts"], environment: "happy-dom" },

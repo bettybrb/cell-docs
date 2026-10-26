@@ -60,8 +60,8 @@ describe("Recycle Bin", () => {
     expect(await listed(ws)).toEqual([doc]);
     expect(await trash(ws)).toEqual([]);
     expect((await api<DocVersionList>("GET", `${path}/versions`)).data.versions).toEqual(versionsBefore);
-    const comments = await api<{ comments: { body: string }[] }>("GET", `${path}/comments`);
-    expect(comments.data.comments.map((c) => c.body)).toEqual(["Keep this"]);
+    const comments = await api<{ threads: { body: string }[] }>("GET", `${path}/comments`);
+    expect(comments.data.threads.map((c) => c.body)).toEqual(["Keep this"]);
     expect((await api("POST", `${path}/restore`)).status).toBe(409); // not in the Recycle Bin any more
   });
 

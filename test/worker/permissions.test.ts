@@ -60,8 +60,8 @@ describe("roles over HTTP", () => {
     // carol: may comment, not edit
     expect((await api("POST", `${path}/comments`, { body: "Looks good" }, "carol")).status).toBe(201);
     expect((await api("PUT", path, { title: "Carol renames" }, "carol")).status).toBe(403);
-    const comments = await api<{ comments: { author: string; body: string }[] }>("GET", `${path}/comments`, undefined, "bob");
-    expect(comments.data.comments).toEqual([expect.objectContaining({ author: "carol", body: "Looks good" })]);
+    const comments = await api<{ threads: { author: string; body: string }[] }>("GET", `${path}/comments`, undefined, "bob");
+    expect(comments.data.threads).toEqual([expect.objectContaining({ author: "carol", body: "Looks good" })]);
 
     // Nothing was changed by the refused requests.
     expect((await api<DocState>("GET", path, undefined, "alice")).data).toMatchObject({ title: "Plan", body: "Shared text" });
