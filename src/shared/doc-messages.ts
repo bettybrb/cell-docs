@@ -12,6 +12,13 @@ import type { EffectiveRole } from "./permissions";
 export const MESSAGE_ROLE = 101;
 
 /**
+ * `[102, json]`: something besides the text changed (`{ topic: "comments" }`
+ * or `{ topic: "proposals" }`); open pages reload that part.
+ */
+export const MESSAGE_CHANGED = 102;
+export type ChangeTopic = "comments" | "proposals";
+
+/**
  * Close codes DocCell uses. y-websocket does not reconnect after a code in
  * 4400-4499, which is right for all of these: trying again cannot help.
  */
@@ -30,4 +37,16 @@ export function roleMessage(role: EffectiveRole): Uint8Array<ArrayBuffer> {
 /** Reads the role from a role message's decoder, positioned after the message type. */
 export function readRole(decoder: decoding.Decoder): EffectiveRole {
   return (JSON.parse(decoding.readVarString(decoder)) as { role: EffectiveRole }).role;
+}
+
+export function changedMessage(topic: ChangeTopic): Uint8Array<ArrayBuffer> {
+  const encoder = encoding.createEncoder();
+  encoding.writeVarUint(encoder, MESSAGE_CHANGED);
+  encoding.writeVarString(encoder, JSON.stringify({ topic }));
+  return new Uint8Array(encoding.toUint8Array(encoder));
+}
+
+/** Reads the topic from a changed message's decoder, positioned after the message type. */
+export function readChangeTopic(decoder: decoding.Decoder): ChangeTopic {
+  return (JSON.parse(decoding.readVarString(decoder)) as { topic: ChangeTopic }).topic;
 }
