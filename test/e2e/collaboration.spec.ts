@@ -50,8 +50,8 @@ async function newBrowser(browser: Browser): Promise<Page> {
 }
 
 /** Opens the document by its URL; resolves once it is live-synced. */
-async function openDoc(page: Page, ids: { ws: string; doc: string }): Promise<void> {
-  await page.goto(`${server.baseUrl}/?workspace=${ids.ws}&doc=${ids.doc}`);
+async function openDoc(page: Page, ids: { ws: string; doc: string }, user = "alice"): Promise<void> {
+  await page.goto(`${server.baseUrl}/?workspace=${ids.ws}&doc=${ids.doc}&user=${user}`);
   await expect(status(page)).toHaveAttribute("data-status", "connected");
   await expect(editor(page)).toBeVisible();
 }
@@ -102,14 +102,15 @@ test("edits in one browser appear in the other without saving", async ({ browser
 test("presence shows collaborators joining and leaving", async ({ browser }) => {
   const ids = await createDoc("Presence.");
   const a = await newBrowser(browser);
-  await openDoc(a, ids);
+  await openDoc(a, ids, "alice");
   await expect(collaboratorCount(a)).toHaveText("1");
+  await expect(a.getByTestId("collaborator")).toHaveText("You (alice)");
 
   const b = await newBrowser(browser);
-  await openDoc(b, ids);
+  await openDoc(b, ids, "bob");
   await expect(collaboratorCount(a)).toHaveText("2");
   await expect(collaboratorCount(b)).toHaveText("2");
-  await expect(a.getByTestId("collaborator").filter({ hasText: /^(, )?Guest-\d+$/ })).toHaveCount(1);
+  await expect(a.getByTestId("collaborator").filter({ hasText: /^(, )?bob$/ })).toHaveCount(1);
 
   // B closes its browser: A sees it leave.
   await b.context().close();
@@ -117,8 +118,9 @@ test("presence shows collaborators joining and leaving", async ({ browser }) => 
 
   // Someone else joins: A sees them.
   const c = await newBrowser(browser);
-  await openDoc(c, ids);
+  await openDoc(c, ids, "carol");
   await expect(collaboratorCount(a)).toHaveText("2");
+  await expect(a.getByTestId("collaborator").filter({ hasText: /^(, )?carol$/ })).toHaveCount(1);
 });
 
 test("a browser that loses its connection reconnects and keeps every edit", async ({ browser }) => {
@@ -128,7 +130,7 @@ test("a browser that loses its connection reconnects and keeps every edit", asyn
   // Route A's sync socket through Playwright so the test can cut it.
   let blocked = false;
   const routes: WebSocketRoute[] = [];
-  await a.routeWebSocket(/\/sync$/, (ws) => {
+  await a.routeWebSocket(/\/sync(\?|$)/, (ws) => {
     if (blocked) {
       ws.close({ code: 1006, reason: "test: offline" });
       return;
@@ -177,7 +179,7 @@ test("shows whether edits are saved and warns before closing with unsaved edits"
   const page = await newBrowser(browser);
   let blocked = false;
   const routes: WebSocketRoute[] = [];
-  await page.routeWebSocket(/\/sync$/, (ws) => {
+  await page.routeWebSocket(/\/sync(\?|$)/, (ws) => {
     if (blocked) {
       ws.close({ code: 1006, reason: "test: offline" });
       return;
