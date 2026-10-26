@@ -7,8 +7,11 @@ import {
   CLOSE_ACCESS_REVOKED,
   CLOSE_DOC_DELETED,
   CLOSE_EDIT_REJECTED,
+  MESSAGE_CHANGED,
   MESSAGE_ROLE,
+  readChangeTopic,
   readRole,
+  type ChangeTopic,
 } from "../shared/doc-messages";
 import type { EffectiveRole } from "../shared/permissions";
 import { MESSAGE_SAVE_CHECK, saveCheckMessage } from "../shared/save-check";
@@ -77,6 +80,8 @@ export interface ConnectedDocSession extends DocSession {
   setOffline(offline: boolean): void;
   /** Calls `listener` whenever status(), unsavedChanges(), offline(), role() or closedReason() changes; returns an unsubscribe function. */
   subscribe(listener: () => void): () => void;
+  /** Calls `listener` when the server says comments or proposals changed; returns an unsubscribe function. */
+  onChanged(listener: (topic: ChangeTopic) => void): () => void;
   /** Closes the connection. Call before switching documents. */
   destroy(): void;
 }
@@ -180,6 +185,12 @@ export function connectDocSession(
     role = readRole(decoder);
     notify();
   };
+  // Comments and proposals live outside the text; the server says when they change.
+  const changeListeners = new Set<(topic: ChangeTopic) => void>();
+  provider.messageHandlers[MESSAGE_CHANGED] = (_encoder, decoder) => {
+    const topic = readChangeTopic(decoder);
+    changeListeners.forEach((listener) => listener(topic));
+  };
   provider.on("connection-close", (event) => {
     const reason = event ? CLOSE_REASONS[event.code] : undefined;
     if (!reason) return;
@@ -221,6 +232,10 @@ export function connectDocSession(
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    onChanged(listener) {
+      changeListeners.add(listener);
+      return () => changeListeners.delete(listener);
     },
     destroy() {
       clearTimeout(checkTimer);

@@ -6,6 +6,7 @@ const REASON_TEXT: Record<DocVersion["reason"], string> = {
   save: "Saved",
   auto: "Before editing",
   restore: "Before a restore",
+  proposal: "Before an agent proposal",
 };
 
 /**

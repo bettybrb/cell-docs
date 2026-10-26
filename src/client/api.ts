@@ -6,6 +6,10 @@ import type {
   CreateFolderRequest,
   DocCatalogue,
   DocComment,
+  Proposal,
+  ProposalList,
+  ProposalRequest,
+  ReplyRequest,
   DocState,
   DocVersionDetail,
   DocVersionList,
@@ -91,8 +95,27 @@ export const api = {
 
   listComments: (workspaceId: string, docId: string) => call<CommentList>("GET", `${doc(workspaceId, docId)}/comments`),
 
+  /** Starts a thread, on the whole document or (with an anchor) on a range of text. */
   addComment: (workspaceId: string, docId: string, comment: AddCommentRequest) =>
     call<DocComment>("POST", `${doc(workspaceId, docId)}/comments`, comment),
+
+  reply: (workspaceId: string, docId: string, threadId: number, reply: ReplyRequest) =>
+    call<DocComment>("POST", `${doc(workspaceId, docId)}/comments/${threadId}/replies`, reply),
+
+  resolveThread: (workspaceId: string, docId: string, threadId: number, resolved: boolean) =>
+    call<CommentList>("POST", `${doc(workspaceId, docId)}/comments/${threadId}/resolve`, { resolved }),
+
+  listProposals: (workspaceId: string, docId: string) => call<ProposalList>("GET", `${doc(workspaceId, docId)}/proposals`),
+
+  /** Asks the simulated agent for a change; it is stored as a pending proposal. */
+  propose: (workspaceId: string, docId: string, request: ProposalRequest) =>
+    call<Proposal>("POST", `${doc(workspaceId, docId)}/proposals`, request),
+
+  applyProposal: (workspaceId: string, docId: string, proposalId: number) =>
+    call<DocState>("POST", `${doc(workspaceId, docId)}/proposals/${proposalId}/apply`),
+
+  discardProposal: (workspaceId: string, docId: string, proposalId: number) =>
+    call<Proposal>("POST", `${doc(workspaceId, docId)}/proposals/${proposalId}/discard`),
 
   listVersions: (workspaceId: string, docId: string) => call<DocVersionList>("GET", `${doc(workspaceId, docId)}/versions`),
 

@@ -5,10 +5,13 @@ import { TEST_USERS } from "../shared/users";
 import { api, type ApiResult } from "./api";
 import { currentCollaborator, currentUser } from "./current-user";
 import { DocumentBrowser } from "./DocumentBrowser";
-import { CommentsPanel, OrganisePanel, PermissionsPanel } from "./DocumentPanels";
+import type { Highlight } from "./comment-highlights";
+import { CommentThreads } from "./CommentThreads";
+import { OrganisePanel, PermissionsPanel } from "./DocumentPanels";
 import { connectDocSession, createDocSession, latestOnly, type ClosedReason, type ConnectedDocSession } from "./doc-session";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { PresenceBar } from "./PresenceBar";
+import { Proposals } from "./Proposals";
 import { RecycleBin } from "./RecycleBin";
 import { useTitleAutosave, type TitleSaveState } from "./useTitleAutosave";
 import { VersionHistory } from "./VersionHistory";
@@ -105,6 +108,12 @@ function CellExplorer() {
   // Bumped to make the version list and Recycle Bin reload.
   const [versionsKey, setVersionsKey] = useState(0);
   const [trashKey, setTrashKey] = useState(0);
+  // Comment threads and the editor: the current selection, the highlighted
+  // ranges, the thread the user picked, and a range to scroll to.
+  const [selection, setSelection] = useState({ from: 0, to: 0 });
+  const [highlights, setHighlights] = useState<Highlight[]>([]);
+  const [activeThread, setActiveThread] = useState<number | null>(null);
+  const [reveal, setReveal] = useState<{ from: number; to: number } | null>(null);
 
   // What the current user may do with the open document. The server checks
   // every request and message anyway; this only adapts the page.
@@ -281,7 +290,14 @@ function CellExplorer() {
           Body (Markdown)
           {live && <PresenceBar session={live} />}
           {text ? (
-            <MarkdownEditor text={text} awareness={live?.awareness ?? null} readOnly={!canEdit} />
+            <MarkdownEditor
+              text={text}
+              awareness={live?.awareness ?? null}
+              readOnly={!canEdit}
+              highlights={opened ? highlights : []}
+              onSelection={(from, to) => setSelection({ from, to })}
+              reveal={reveal}
+            />
           ) : (
             <p>Connecting…</p>
           )}
@@ -314,7 +330,30 @@ function CellExplorer() {
                 void refreshCatalogue();
               }}
             />
-            <CommentsPanel doc={doc} canComment={canComment} />
+            <CommentThreads
+              doc={doc}
+              session={live}
+              selection={selection}
+              canComment={canComment}
+              activeId={activeThread}
+              onHighlights={setHighlights}
+              onReveal={(thread, range) => {
+                setActiveThread(thread?.id ?? null);
+                setReveal(range ? { ...range } : null);
+              }}
+            />
+            <Proposals
+              doc={doc}
+              session={live}
+              role={closed ? null : role}
+              onApplied={(applied) => {
+                // The text arrives through live sync; the version list gains "Before an agent proposal".
+                setDoc(applied);
+                display({ ok: true, status: 200, data: applied });
+                setVersionsKey((key) => key + 1);
+                void refreshCatalogue();
+              }}
+            />
             <VersionHistory
               workspaceId={opened.workspaceId}
               docId={opened.docId}

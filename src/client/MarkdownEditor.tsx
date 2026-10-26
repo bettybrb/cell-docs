@@ -6,6 +6,7 @@ import { useEffect, useRef } from "react";
 import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import type { Awareness } from "y-protocols/awareness";
 import type * as Y from "yjs";
+import { commentHighlights, setHighlights, type Highlight } from "./comment-highlights";
 
 /** Holds the read-only setting so it can change without rebuilding the editor. */
 const readOnlySetting = new Compartment();
@@ -24,6 +25,7 @@ export function createMarkdownEditor(
   text: Y.Text,
   awareness: Awareness | null = null,
   readOnly = false,
+  onSelection?: (from: number, to: number) => void,
 ): EditorView {
   return new EditorView({
     parent,
@@ -36,6 +38,13 @@ export function createMarkdownEditor(
       EditorView.lineWrapping,
       yCollab(text, awareness),
       readOnlySetting.of(readOnlyExtension(readOnly)),
+      commentHighlights(text),
+      EditorView.updateListener.of((update) => {
+        if (update.selectionSet && onSelection) {
+          const { from, to } = update.state.selection.main;
+          onSelection(from, to);
+        }
+      }),
     ],
   });
 }
@@ -55,16 +64,30 @@ export function MarkdownEditor({
   text,
   awareness = null,
   readOnly = false,
+  highlights = [],
+  onSelection,
+  reveal,
 }: {
   text: Y.Text;
   awareness?: Awareness | null;
   readOnly?: boolean;
+  /** Commented ranges to highlight (they follow their text as it is edited). */
+  highlights?: Highlight[];
+  /** Told the selection whenever it changes (offsets in the text). */
+  onSelection?: (from: number, to: number) => void;
+  /** Selects and scrolls to this range; a new object each time it should happen. */
+  reveal?: { from: number; to: number } | null;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
+  const selectionListener = useRef(onSelection);
+  selectionListener.current = onSelection;
 
   useEffect(() => {
-    view.current = createMarkdownEditor(host.current!, text, awareness, readOnly);
+    view.current = createMarkdownEditor(host.current!, text, awareness, readOnly, (from, to) =>
+      selectionListener.current?.(from, to),
+    );
+    view.current.dispatch({ effects: setHighlights.of(highlights) });
     return () => {
       view.current?.destroy();
       view.current = null;
@@ -74,6 +97,16 @@ export function MarkdownEditor({
   useEffect(() => {
     if (view.current) setReadOnly(view.current, readOnly);
   }, [readOnly]);
+
+  useEffect(() => {
+    view.current?.dispatch({ effects: setHighlights.of(highlights) });
+  }, [highlights]);
+
+  useEffect(() => {
+    if (!view.current || !reveal) return;
+    view.current.dispatch({ selection: { anchor: reveal.from, head: reveal.to }, scrollIntoView: true });
+    view.current.focus();
+  }, [reveal]);
 
   return (
     <div className="markdown-editor" data-testid="markdown-editor" data-readonly={readOnly} ref={host} />

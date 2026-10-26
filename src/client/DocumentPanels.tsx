@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { DocCatalogue, DocComment, DocState } from "../shared/api-types";
+import type { DocCatalogue, DocState } from "../shared/api-types";
 import { canManage, ROLES, type Role } from "../shared/permissions";
 import { TEST_USERS } from "../shared/users";
 import { api } from "./api";
@@ -156,60 +156,6 @@ export function PermissionsPanel({ doc, onChanged }: { doc: DocState; onChanged:
         ))}
         <button onClick={save} disabled={!manager}>
           Save permissions
-        </button>
-        {message && <span className="muted">{message}</span>}
-      </div>
-    </details>
-  );
-}
-
-/** Comments on the open document: readers see them, commenters and editors can add one. */
-export function CommentsPanel({ doc, canComment }: { doc: DocState; canComment: boolean }) {
-  const [comments, setComments] = useState<DocComment[] | "error">([]);
-  const [draft, setDraft] = useState("");
-  const [message, setMessage] = useState<string | null>(null);
-
-  const load = async () => {
-    const r = await api.listComments(doc.workspaceId, doc.docId);
-    setComments(r.ok ? r.data.comments : "error");
-  };
-
-  useEffect(() => {
-    void load();
-  }, [doc.workspaceId, doc.docId]);
-
-  const add = async () => {
-    const r = await api.addComment(doc.workspaceId, doc.docId, { body: draft });
-    setMessage(r.ok ? null : r.error.message);
-    if (r.ok) setDraft("");
-    await load();
-  };
-
-  return (
-    <details className="wide panel" data-testid="comments">
-      <summary>Comments ({comments === "error" ? "?" : comments.length})</summary>
-      <button onClick={load}>Refresh</button>
-      {comments === "error" ? (
-        <p>Could not load comments.</p>
-      ) : (
-        <ul>
-          {comments.map((c) => (
-            <li key={c.id} data-testid="comment">
-              <strong>{c.author}</strong> <span className="muted">{new Date(c.createdAt).toLocaleString()}</span>: {c.body}
-            </li>
-          ))}
-        </ul>
-      )}
-      <div className="inline">
-        <input
-          aria-label="New comment"
-          placeholder={canComment ? "Write a comment" : "You may only read this document"}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          disabled={!canComment}
-        />
-        <button onClick={add} disabled={!canComment || draft.trim() === ""}>
-          Add comment
         </button>
         {message && <span className="muted">{message}</span>}
       </div>
