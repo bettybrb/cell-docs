@@ -53,11 +53,24 @@ Delete that folder to start from an empty state.
 |---|---|---|
 | `GET` | `/api/health` | none (answered by the router) |
 | `GET` / `PUT` | `/api/workspaces/:workspaceId` | `WorkspaceCell` named `workspace:<workspaceId>` |
-| `GET` | `/api/workspaces/:workspaceId/docs` | `WorkspaceCell` (the document catalogue) |
-| `GET` / `PUT` | `/api/workspaces/:workspaceId/docs/:docId` | `DocCell` named `doc:<workspaceId>/<docId>`, then `WorkspaceCell` to register it |
+| `GET` | `/api/workspaces/:workspaceId/docs` | `WorkspaceCell`: documents you may read, with folders and tags |
+| `GET` | `/api/workspaces/:workspaceId/search?q=&tag=&folder=` | `WorkspaceCell`: search titles, text and tags |
+| `GET` | `/api/workspaces/:workspaceId/trash` | `WorkspaceCell`: the Recycle Bin |
+| `POST` / `DELETE` | `/api/workspaces/:workspaceId/folders[/:folderId]` | `WorkspaceCell`: create a folder / delete an empty one |
+| `GET` / `PUT` / `DELETE` | `/api/workspaces/:workspaceId/docs/:docId` | `DocCell` named `doc:<workspaceId>/<docId>`, then `WorkspaceCell` to register it. `DELETE` moves it to the Recycle Bin |
+| `PUT` | `/api/workspaces/:workspaceId/docs/:docId/meta` | `WorkspaceCell`: folder and tags |
+| `POST` | `/api/workspaces/:workspaceId/docs/:docId/restore` | `DocCell`: out of the Recycle Bin |
+| `POST` | `/api/workspaces/:workspaceId/docs/:docId/purge` | `DocCell`: delete for good now (owner) |
+| `PUT` | `/api/workspaces/:workspaceId/docs/:docId/permissions` | `DocCell`: default role and per-user roles (owner) |
+| `GET` / `POST` | `/api/workspaces/:workspaceId/docs/:docId/comments` | `DocCell`: comments |
 | `GET` (WebSocket) | `/api/workspaces/:workspaceId/docs/:docId/sync` | `DocCell`: live Yjs sync of the body (existing docs only) |
-| `GET` | `/api/workspaces/:workspaceId/docs/:docId/versions` | `DocCell`: stored versions, newest first (preview only) |
+| `GET` | `/api/workspaces/:workspaceId/docs/:docId/versions[/:id]` | `DocCell`: versions, newest first / one version's full text |
 | `POST` | `/api/workspaces/:workspaceId/docs/:docId/versions/:id/restore` | `DocCell`, then `WorkspaceCell`: restore title and body |
+
+Every request acts as a **test user**: `alice`, `bob` or `carol`, named in
+the `x-test-user` header (or `?user=` on the WebSocket); requests that name
+none act as `alice`. In the browser, add `?user=bob` to the page URL or use
+the switcher at the top. This is for testing permissions, not a login.
 
 Ids use lowercase letters, digits and dashes (1–63 characters).
 `GET` returns `404` until the resource has been written once. The document
@@ -107,6 +120,8 @@ curl localhost:5180/api/workspaces/demo/docs/intro
      window gets the text back; the "Before a restore" entry undoes it.
    - *Title autosave:* change the title; within a second it says "Saved"
      and the document list shows the new title.
+7. **Documents and permissions:** see "Testing documents, permissions and the
+   Recycle Bin by hand" in [docs/architecture.md](docs/architecture.md).
 
 ## Project layout
 
@@ -136,7 +151,9 @@ wrangler.jsonc                 bindings and SQLite migrations
 
 ## Known limitations
 
-- No authentication: anyone who can reach the server can read and write any cell.
+- No authentication: the test user is whatever the request says, so the
+  permissions show how enforcement works but protect nothing. Anyone who can
+  reach the server can act as any test user.
 - Reading a resource that was never written still creates an empty database
   file for that cell, because the cell creates its tables when it starts.
 - Opening a document connects it to live sync, so body edits are saved and
@@ -146,7 +163,12 @@ wrangler.jsonc                 bindings and SQLite migrations
   `revision` counts saves (including title autosaves), not live body edits.
 - The body length limit (100,000 characters) is only checked on `PUT`, not on
   live edits.
-- Collaborators are anonymous guests with random names (no accounts yet).
+- A reader's *delete-only* change on the live connection is dropped silently
+  rather than refused (their editor is read-only, so this only happens with
+  a modified client). Anything that adds text is refused and disconnects.
+- Search matches substrings in the catalogue's copy of each document, which
+  follows live edits within about 2 seconds. Comments are per document, not
+  attached to a passage of text.
 - Edits made offline are kept in the browser (IndexedDB) and synced the next
   time the document is opened online, but a document cannot be *opened*
   while offline. Local copies are never cleaned up automatically.

@@ -155,7 +155,79 @@ closing while anything is unconfirmed.
 A restore applies the body as an ordinary Yjs edit (only the differing
 range), so every open browser updates live, sets the title, and raises the
 revision. It goes through the router like a save, which refreshes the
-catalogue's title copy.
+catalogue's title copy. Nothing is ever deleted by a restore: every older
+version stays, and the replaced text becomes one more version.
+
+Each version records **who** caused it (`created_by`: the saver, the editor
+whose edit started a new burst, or the restorer) and **who edited** the
+document since the previous version (`editors`, collected from saves and
+from each live edit's socket). `GET …/versions/:id` returns a version's full
+text, which the page shows as a preview.
+
+## Users and permissions
+
+There is no login. A request names a **test user** (`alice`, `bob`,
+`carol`) in the `x-test-user` header, or `?user=` on the sync WebSocket
+because browsers cannot set headers there. The router checks the name and
+passes it to the cell in its own `x-user` header, like the cell name, so a
+client cannot bypass the router's check. Requests without a user act as
+`alice`.
+
+Each `DocCell` owns its permissions: an **owner** (the creator), a
+**default role** for everyone else and **per-user roles**. Roles, weakest
+first: `none` (a default of `none` makes the document private), `read`,
+`comment`, `edit`; the owner can also change permissions and delete for
+good. Documents created before permissions have no owner and stay editable
+by everyone; the first editor to change their permissions becomes the owner.
+
+Enforcement is on the server, in the `DocCell`:
+
+- **Every HTTP request** checks the caller's role (`403 forbidden` otherwise).
+- **Every WebSocket message** is checked against the *current* permissions,
+  not the ones at connect time. A reader's normal sync messages add nothing;
+  a message that would add content is refused and the connection is closed
+  with code `4409` ("edit rejected"), so the client does not keep text it
+  believes is saved (it also deletes its local IndexedDB copy).
+- **When permissions change**, every connected browser is told its new role
+  at once (message `[101, json]`), and the page switches the editor to
+  read-only in place; one that lost access is disconnected with `4403`.
+
+The workspace catalogue keeps a copy of each document's permissions and
+uses it to list, search and show the Recycle Bin only with documents the
+user may read. The copy decides what is *shown*; the `DocCell` still
+decides every request.
+
+## Recycle Bin
+
+`DELETE …/docs/:docId` is a soft delete: the `DocCell` records who deleted it
+and when, closes every connection with `4410`, refuses reads and writes with
+`410`, and schedules a Durable Object **alarm** for the purge time (30 days;
+`TRASH_RETENTION_MS` in `wrangler.jsonc`, or `.dev.vars` for local testing).
+Its text, Yjs history, versions and comments stay untouched.
+
+- **Restore** (`POST …/restore`, editors) clears the deleted state; the
+  document keeps its id and everything else.
+- **Delete for good** happens when the alarm fires after the deadline, or at
+  once with `POST …/purge` (owner only). The `DocCell` first removes its
+  catalogue entry (a cell-to-cell call to the `WorkspaceCell`), then erases
+  all of its own storage with `deleteAll()`. If the catalogue call fails,
+  nothing is erased and the alarm retries. Afterwards the id can be used for
+  a new document; its new `createdAt` keeps browsers from merging old local
+  copies into it.
+
+## Folders, tags and search
+
+Folders and tags belong to the catalogue (`WorkspaceCell`): a document's id
+and URL never depend on its folder, and moving it changes one column.
+Folders can be nested and are deleted only when empty. Tags are stored in
+lower case and offered for reuse with their counts.
+
+Search (`GET …/search?q=&tag=&folder=`) matches `q` case-insensitively in
+titles, text and tags, and returns a snippet around content matches. It
+reads the catalogue's copy of each document's text: the router refreshes it
+after every document request, and the `DocCell` refreshes it about 2 seconds
+after live edits (which do not pass the router), using the same alarm as the
+Recycle Bin.
 
 ## Document catalogue
 
@@ -203,14 +275,25 @@ cell_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)
 
 -- WorkspaceCell
 workspace (id INTEGER PRIMARY KEY CHECK (id = 1), display_name, created_at, updated_at)
-documents (doc_id TEXT PRIMARY KEY, created_at, title)  -- title: copy, NULL until next read/save
+documents (doc_id TEXT PRIMARY KEY, created_at, updated_at, title, body_text, owner, default_role, acl,
+           deleted_at, deleted_by, purge_at,   -- copies from the DocCell
+           folder_id)                          -- the catalogue's own
+folders  (id TEXT PRIMARY KEY, name, parent_id, created_at)
+doc_tags (doc_id, tag, PRIMARY KEY (doc_id, tag))
 
 -- DocCell
-doc (id INTEGER PRIMARY KEY CHECK (id = 1), title, body, revision, created_at, updated_at)
+doc (id INTEGER PRIMARY KEY CHECK (id = 1), title, body, revision, created_at, updated_at,
+     owner, default_role, acl, deleted_at, deleted_by, purge_at)
 yjs_updates (seq INTEGER PRIMARY KEY AUTOINCREMENT, data BLOB)  -- body = merged updates
 yjs_quarantine (seq INTEGER PRIMARY KEY, data BLOB, quarantined_at)  -- unreadable updates
-doc_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at, reason, title, body)  -- newest 50
+doc_versions (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at, reason, title, body, created_by, editors)  -- newest 50
+comments (id INTEGER PRIMARY KEY AUTOINCREMENT, created_at, author, body)
 ```
+
+Columns added after a table was first created are added on startup when
+missing (`ALTER TABLE … ADD COLUMN`), because `CREATE TABLE IF NOT EXISTS`
+never changes an existing table. Existing data keeps working with the new
+defaults.
 
 `CHECK (id = 1)` allows only one row, because each database belongs to exactly
 one workspace or one document.
@@ -271,3 +354,38 @@ How this is verified:
 - **Phase 5 (celld):** cells talk to the router only through `fetch()`, a
   small and portable interface, which should make running them on another
   runtime easier.
+
+## Testing documents, permissions and the Recycle Bin by hand
+
+Start the app with `npm run dev` and open two windows side by side, one as
+`alice` and one as `bob` (use the "Acting as test user" switcher, or add
+`&user=bob` to the URL). A private window works as the second browser.
+
+1. **Permissions while connected.** As alice, open a document. As bob, open
+   the same document (Load doc) and type: alice sees it live. As alice,
+   open **Permissions**, set bob to *Read only* and save. Bob's status line
+   changes to "Read only" at once and his editor stops accepting keys, but
+   he still sees alice's typing. Set *Everyone else* to *No access
+   (private)* and bob to *Same as everyone*: bob's page says his access was
+   removed, the document disappears from his list, and loading it shows
+   `403`.
+2. **Comment role.** Give carol *Can comment*. As carol (third window), the
+   editor is read-only, Save is disabled, and **Comments** lets her add one.
+3. **Recycle Bin.** As alice, click **Move to Recycle Bin**. Bob's open copy
+   says it was moved there; it vanishes from both lists and appears under
+   **Recycle Bin** with who deleted it and when it will be erased. Click
+   **Restore**: the document reopens with the same id, text, versions and
+   comments. **Delete forever** (owner only) erases it at once.
+   To watch the automatic deletion, create `.dev.vars` with
+   `TRASH_RETENTION_MS=60000`, restart `npm run dev`, delete a document and
+   wait a minute: it leaves the Recycle Bin by itself.
+4. **Folders, tags and search.** Create a folder, then in **Folder, tags and
+   delete** move the open document into it and give it tags. The list shows
+   the folder and tags, and the URL (the id) is unchanged. Type a word from
+   the text into the search box: the document appears with a snippet. Pick
+   a tag in the tag filter.
+5. **Version history.** Click **Save doc** as alice, edit and save as bob.
+   **Versions** shows who saved each version and who edited in between.
+   **Preview** shows an old version's full text; **Restore** brings it back
+   in every open window and adds the replaced text as a new version, so
+   nothing is lost.
