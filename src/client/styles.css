@@ -131,10 +131,60 @@ button[aria-current="true"] {
   margin: 2px 0;
 }
 
+/* The editor and its comment margin scroll together, so cards stay beside their text. */
+.doc-area {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  max-height: 70vh;
+  overflow: auto;
+  margin-top: 4px;
+}
+
+.doc-area-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.doc-area .markdown-editor .cm-editor {
+  max-height: none;
+}
+
+.threads {
+  position: relative;
+  flex: 0 0 280px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
 .threads > li {
-  margin: 6px 0;
-  padding: 4px 6px;
+  position: absolute;
+  left: 0;
+  right: 0;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid #8884;
   border-left: 3px solid #edae49;
+  border-radius: 4px;
+  background: Canvas;
+  font-size: 0.9em;
+  transition: top 0.15s;
+}
+
+.threads > li[data-thread-id] {
+  cursor: pointer;
+}
+
+.threads textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+}
+
+.threads .inline input {
+  flex: 1;
+  min-width: 0;
 }
 
 .threads > li[data-resolved="true"] {
@@ -142,7 +192,32 @@ button[aria-current="true"] {
 }
 
 .threads .active-thread {
-  background: #edae4922;
+  background: color-mix(in srgb, #edae49 13%, Canvas);
+  box-shadow: 0 1px 4px #0003;
+}
+
+/* Narrow screens: the cards go below the editor, one after another. */
+@media (max-width: 720px) {
+  .doc-area {
+    flex-direction: column;
+    align-items: stretch;
+    max-height: none;
+    overflow: visible;
+  }
+
+  .doc-area .markdown-editor .cm-editor {
+    max-height: 60vh;
+  }
+
+  .threads {
+    flex-basis: auto;
+    min-height: 0 !important;
+  }
+
+  .threads > li {
+    position: static;
+    margin: 6px 0;
+  }
 }
 
 .threads .reply {

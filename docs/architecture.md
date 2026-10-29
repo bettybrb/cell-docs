@@ -249,6 +249,19 @@ owner can start, reply, resolve and reopen. Every change sends
 `[102, {"topic":"comments"}]` on the sync WebSocket, and open pages reload
 the threads.
 
+In the page, threads are cards in a margin beside the editor; the editor and
+margin scroll together. The editor reports where each highlight starts and
+the cards are placed level with their text, pushed apart so they never
+overlap; the picked card sits exactly beside its text and the cards above it
+make room (`comment-layout.ts`). Threads with no text to sit beside (on the
+whole document, text deleted, resolved) come first. Clicking a highlight
+picks its card; clicking a card selects its text. **Add comment** opens a
+draft card for the selection (or the whole document) with **Submit** and
+**Cancel**. The margin can be hidden, and below 720px wide it goes under the
+editor. Between highlight changes, the editor maps highlights through each
+edit rather than reading the Y.Text, because the Yjs binding writes a local
+edit to the Y.Text only after the editor's own state has updated.
+
 Why not keep threads inside the Yjs document? Commenters may not change the
 document, and the server would then have to inspect every binary update to
 tell comment changes from text changes. SQL plus relative positions keeps
@@ -419,7 +432,7 @@ Start the app with `npm run dev` and open two windows side by side, one as
    removed, the document disappears from his list, and loading it shows
    `403`.
 2. **Comment role.** Give carol *Can comment*. As carol (third window), the
-   editor is read-only, Save is disabled, and **Comments** lets her add one.
+   editor is read-only, Save is disabled, and **Add comment** lets her add one.
 3. **Recycle Bin.** As alice, click **Move to Recycle Bin**. Bob's open copy
    says it was moved there; it vanishes from both lists and appears under
    **Recycle Bin** with who deleted it and when it will be erased. Click
@@ -438,13 +451,16 @@ Start the app with `npm run dev` and open two windows side by side, one as
    **Preview** shows an old version's full text; **Restore** brings it back
    in every open window and adds the replaced text as a new version, so
    nothing is lost.
-6. **Comments on text.** As alice, select a few words in the editor, type
-   in the comment box and click **Comment on selection**: the words are
-   highlighted in both windows. As bob, type before and after them: the
-   highlight stays on the same words. Bob can **Reply** and **Resolve**;
-   alice sees both without reloading (tick **Show resolved** to see resolved
-   threads). Delete the highlighted words: the thread says its text was
-   deleted and keeps the quote.
+6. **Comments on text.** As alice, select a few words in the editor, click
+   **Add comment**, type in the draft card beside them and click **Submit**:
+   the words are highlighted in both windows, with the card level with
+   them. Click the highlight to pick its card, or the card to select its
+   words. As bob, type before and after them: the highlight stays on the
+   same words. Bob can **Reply** and **Resolve**; alice sees both without
+   reloading, and the highlight goes. Tick **Show resolved** and click
+   **Reopen**: the thread and highlight come back with every reply. Delete
+   the highlighted words: the card is marked *Text deleted* and keeps the
+   quote.
 7. **Agent proposals.** As alice, enter *find* and *replace with* and click
    **Ask agent: replace** (or *tidy up*, or *add a summary*). The preview
    shows each changed line as removed and added text; the document does not

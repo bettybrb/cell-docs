@@ -139,8 +139,9 @@ test("a commenter can comment but not edit", async ({ browser }) => {
   await expect(carol.getByTestId("markdown-editor")).toHaveAttribute("data-readonly", "true");
   await expect(carol.getByRole("button", { name: "Save doc" })).toBeDisabled();
 
-  await carol.getByLabel("New comment").fill("Section 2 needs numbers.");
   await carol.getByRole("button", { name: "Add comment" }).click();
+  await carol.getByLabel("New comment").fill("Section 2 needs numbers.");
+  await carol.getByRole("button", { name: "Submit" }).click();
   await expect(carol.getByTestId("comment")).toContainText("carol");
   await expect(carol.getByTestId("comment")).toContainText("Section 2 needs numbers.");
 });

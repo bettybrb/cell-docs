@@ -5,7 +5,7 @@ import { TEST_USERS } from "../shared/users";
 import { api, type ApiResult } from "./api";
 import { currentCollaborator, currentUser } from "./current-user";
 import { DocumentBrowser } from "./DocumentBrowser";
-import type { Highlight } from "./comment-highlights";
+import type { Highlight, HighlightPosition } from "./comment-highlights";
 import { CommentThreads } from "./CommentThreads";
 import { OrganisePanel, PermissionsPanel } from "./DocumentPanels";
 import { connectDocSession, createDocSession, latestOnly, type ClosedReason, type ConnectedDocSession } from "./doc-session";
@@ -109,9 +109,11 @@ function CellExplorer() {
   const [versionsKey, setVersionsKey] = useState(0);
   const [trashKey, setTrashKey] = useState(0);
   // Comment threads and the editor: the current selection, the highlighted
-  // ranges, the thread the user picked, and a range to scroll to.
+  // ranges and where the editor shows them, the thread the user picked, and a
+  // range to scroll to.
   const [selection, setSelection] = useState({ from: 0, to: 0 });
   const [highlights, setHighlights] = useState<Highlight[]>([]);
+  const [highlightPositions, setHighlightPositions] = useState<HighlightPosition[]>([]);
   const [activeThread, setActiveThread] = useState<number | null>(null);
   const [reveal, setReveal] = useState<{ from: number; to: number } | null>(null);
 
@@ -243,6 +245,21 @@ function CellExplorer() {
     setDoc(null);
   };
 
+  const editor = text ? (
+    <MarkdownEditor
+      text={text}
+      awareness={live?.awareness ?? null}
+      readOnly={!canEdit}
+      highlights={opened ? highlights : []}
+      onSelection={(from, to) => setSelection({ from, to })}
+      onHighlightClick={setActiveThread}
+      onHighlightLayout={setHighlightPositions}
+      reveal={reveal}
+    />
+  ) : (
+    <p>Connecting…</p>
+  );
+
   return (
     <section>
       <h2>2. Cell explorer</h2>
@@ -289,17 +306,24 @@ function CellExplorer() {
         <div className="wide">
           Body (Markdown)
           {live && <PresenceBar session={live} />}
-          {text ? (
-            <MarkdownEditor
-              text={text}
-              awareness={live?.awareness ?? null}
-              readOnly={!canEdit}
-              highlights={opened ? highlights : []}
-              onSelection={(from, to) => setSelection({ from, to })}
-              reveal={reveal}
-            />
+          {opened && doc ? (
+            <CommentThreads
+              doc={doc}
+              session={live}
+              selection={selection}
+              canComment={canComment}
+              activeId={activeThread}
+              positions={highlightPositions}
+              onHighlights={setHighlights}
+              onReveal={(thread, range) => {
+                setActiveThread(thread?.id ?? null);
+                setReveal(range ? { ...range } : null);
+              }}
+            >
+              {editor}
+            </CommentThreads>
           ) : (
-            <p>Connecting…</p>
+            editor
           )}
         </div>
         <div className="buttons">
@@ -328,18 +352,6 @@ function CellExplorer() {
                 setDoc(updated);
                 display({ ok: true, status: 200, data: updated });
                 void refreshCatalogue();
-              }}
-            />
-            <CommentThreads
-              doc={doc}
-              session={live}
-              selection={selection}
-              canComment={canComment}
-              activeId={activeThread}
-              onHighlights={setHighlights}
-              onReveal={(thread, range) => {
-                setActiveThread(thread?.id ?? null);
-                setReveal(range ? { ...range } : null);
               }}
             />
             <Proposals
