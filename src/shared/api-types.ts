@@ -206,7 +206,7 @@ export interface Proposal {
   id: number;
   createdAt: string;
   requestedBy: string;
-  agent: "simulated";
+  agent: "simulated" | "ai";
   /** What was asked, in words. */
   instruction: string;
   /** Short description of what the agent changed. */
@@ -271,6 +271,12 @@ export type ResolveRequest = typeof ResolveRequest.Type;
 export const ProposalRequest = Schema.Union([
   Schema.Struct({ action: Schema.Literal("tidy") }),
   Schema.Struct({ action: Schema.Literal("summary") }),
+  /** A real model: natural-language editing, or summarising. */
+  Schema.Struct({
+    action: Schema.Literal("ai"),
+    mode: Schema.Literals(["edit", "summarise"]),
+    instruction: Schema.String.check(Schema.isMaxLength(1_000)),
+  }),
   Schema.Struct({
     action: Schema.Literal("replace"),
     find: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),

@@ -35,6 +35,8 @@ export function Proposals({
   const [find, setFind] = useState("");
   const [replace, setReplace] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  const [instruction, setInstruction] = useState("");
+  const [busy, setBusy] = useState(false);
   const canAsk = role !== null && allows(role, "comment");
   const canApply = role !== null && allows(role, "edit");
 
@@ -65,9 +67,11 @@ export function Proposals({
   }, [doc.workspaceId, doc.docId, session]);
 
   const ask = async (request: ProposalRequest) => {
+    setBusy(true);
     const r = await api.propose(doc.workspaceId, doc.docId, request);
     setMessage(r.ok ? `The agent proposed ${r.data.summary}.` : r.error.message);
     if (r.ok) setOpen(r.data.id);
+    setBusy(false);
     await load();
   };
 
@@ -90,6 +94,26 @@ export function Proposals({
     <details className="wide panel" data-testid="proposals" open>
       <summary>Agent proposals ({pending} waiting)</summary>
       <p className="muted">A simulated agent (no AI model): it proposes a change, and nothing changes until someone applies it.</p>
+      <div className="inline" data-testid="ai-agent">
+        <input
+          aria-label="AI instruction"
+          placeholder="Tell the AI what to change…"
+          value={instruction}
+          onChange={(e) => setInstruction(e.target.value)}
+          disabled={!canAsk || busy}
+          size={36}
+        />
+        <button
+          onClick={() => ask({ action: "ai", mode: "edit", instruction })}
+          disabled={!canAsk || busy || instruction.trim() === ""}
+        >
+          Ask AI: edit
+        </button>
+        <button onClick={() => ask({ action: "ai", mode: "summarise", instruction: "" })} disabled={!canAsk || busy}>
+          Ask AI: summarise
+        </button>
+        {busy && <span className="muted">AI is working…</span>}
+      </div>
       <div className="inline">
         <button onClick={() => ask({ action: "tidy" })} disabled={!canAsk}>
           Ask agent: tidy up
@@ -123,7 +147,7 @@ export function Proposals({
             const mayDiscard = canApply || proposal.requestedBy === currentUser();
             return (
               <li key={proposal.id} data-testid="proposal" data-status={proposal.status}>
-                <strong>{proposal.instruction}</strong>{" "}
+                <strong>{proposal.instruction}</strong>{proposal.agent === "ai" && <span className="muted"> [AI]</span>}{" "}
                 <span className="muted">
                   asked by {proposal.requestedBy}, {new Date(proposal.createdAt).toLocaleString()} · {proposal.summary} ·{" "}
                   {STATUS_TEXT[proposal.status]}
