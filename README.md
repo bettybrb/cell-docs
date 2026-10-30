@@ -1,184 +1,238 @@
 # cell-docs-lab
 
-An exploration project: a small document application built from **cells**,
-where each cell is one [Cloudflare Durable Object](https://developers.cloudflare.com/durable-objects/)
-with its own private SQLite database.
+An exploration project: a small collaborative documents and spreadsheets
+application built from **cells**. A cell is one
+[Cloudflare Durable Object](https://developers.cloudflare.com/durable-objects/)
+with its own private SQLite database. A stateless Worker routes each request
+to exactly one cell.
 
-- One `WorkspaceCell` per workspace, one `DocCell` per document.
-- A stateless Worker routes every API request to exactly one cell, chosen
-  deterministically from the URL.
-- Everything runs locally in [workerd](https://github.com/cloudflare/workerd),
-  the open-source Workers runtime. No Cloudflare account is needed.
+Everything runs locally in [workerd](https://github.com/cloudflare/workerd),
+the open-source Workers runtime. No Cloudflare account is needed, and nothing
+has been deployed.
 
-**Status:** Phases 1, 3 and 4 are done: cells with per-cell SQLite, live
-collaborative Markdown editing with presence, and autosave, reconnect and
-recovery. From Phase 2 the document catalogue is done; deleting and renaming
-documents are not. See [Roadmap](#roadmap).
-Design notes are in [docs/architecture.md](docs/architecture.md).
+Further reading: [docs/architecture.md](docs/architecture.md) (design notes
+for documents), [DEMO.md](DEMO.md) (walk-through),
+[docs/celld-smoke-test.md](docs/celld-smoke-test.md) (a first run on the celld
+runtime).
 
-## Requirements
+## Architecture
 
-- Node.js 22.18 or newer (tested with 23.11)
-- npm 10 or 11. Installing from the lockfile works with both. To *add or
-  upgrade* packages, use `npx npm@11 install <pkg>`: npm 10 crashes while
-  resolving this dependency tree (an internal `edgesOut` error). The
-  `allowScripts` field in `package.json` is npm 11's install-script allowlist.
-
-## Quick start
-
-```sh
-npm install          # install dependencies
-npm run dev          # start the app at http://localhost:5180
+```
+Browser ──HTTP / WebSocket──▶ Worker (router) ──stub.fetch()──▶ Cell (Durable Object) ──SQL──▶ its own SQLite
 ```
 
-Stop the server with `Ctrl+C`. Data is kept in `.wrangler/state/` (git-ignored).
-Delete that folder to start from an empty state.
+| Cell class | One instance per | Name | Stores |
+|---|---|---|---|
+| `WorkspaceCell` | workspace | `workspace:<ws>` | settings, the catalogue of documents and sheets (folders, tags, searchable text copy), the Recycle Bin |
+| `DocCell` | document | `doc:<ws>/<doc>` | title, permissions, the body as Yjs updates plus a plain-text copy, versions, comment threads, AI/agent proposals |
+| `SheetCell` | spreadsheet | `sheet:<ws>/<sheet>` | raw cell text, permissions, chart configurations |
 
-## Scripts
+- **Worker** ([src/worker/index.ts](src/worker/index.ts)): keeps no state. It
+  matches the URL, derives the cell name ([addressing.ts](src/worker/addressing.ts)),
+  and forwards the request. The same name always maps to the same Durable
+  Object id, so no lookup table is needed. The Worker sets an `x-cell-name`
+  header itself; a client cannot pick another cell.
+- **Durable Objects** give each resource a single running instance. Requests
+  for one document or sheet are handled in one place, one at a time, so there
+  are no cross-instance locks or races to manage. WebSocket sessions use the
+  Hibernation API, so an idle cell can leave memory with connections open.
+- **Per-cell SQLite** (`new_sqlite_classes` in [wrangler.jsonc](wrangler.jsonc))
+  keeps code and data together: reads and writes are local calls through
+  `ctx.storage.sql`, and one cell cannot read another's database. Plain SQL,
+  no ORM.
+- **Catalogue.** A document or sheet registers a summary in its
+  `WorkspaceCell` after writes, which powers listing and search. Registration
+  can fail independently of the save; the API then answers `502
+  catalogue_registration_failed` and a retry is safe.
+
+The cell boundary is also the unit of isolation: permissions are checked
+inside the cell that owns the resource, not in the router.
+
+## Implemented features
+
+**Documents**
+- Live collaborative Markdown editing (Yjs over WebSockets, CodeMirror 6) with
+  presence and cursors.
+- Autosave, reconnect, and offline edits kept in IndexedDB and synced on the
+  next online open; version history with restore; repair of damaged Yjs
+  storage.
+- Roles per document (`none`, `read`, `comment`, `edit`, plus owner),
+  enforced in the cell, including on the live socket.
+- Comment threads (optionally anchored to text), Recycle Bin (30 days by
+  default, `TRASH_RETENTION_MS`), folders, tags and search.
+
+**Spreadsheets**
+- Up to 100 rows × 26 columns. Cells store raw text; a leading `=` makes a
+  formula, evaluated by the shared engine in [src/shared/sheet.ts](src/shared/sheet.ts):
+  `+ - * / ( )`, `SUM`, `AVERAGE`, `MIN`, `MAX`, `COUNT`, ranges, and the errors
+  `#ERR`, `#REF`, `#DIV/0`, `#CYCLE`, `#VALUE`.
+- Live editing over WebSockets; the server broadcasts each accepted edit.
+  Conflicts are last-writer-wins per cell.
+- Per-sheet permissions (default role and per-user roles, owner-managed).
+
+**Charts**
+- Bar (vertical or horizontal) and line charts over cell ranges, up to 12 per
+  sheet and 1–6 series each. A chart stores ranges, not data, so it follows
+  edits to the cells. Charts can be created, edited and deleted, and changes
+  reach all open pages.
+
+**AI proposals**
+- *Documents:* "Ask AI: edit" (free-text instruction) and "Ask AI: summarise"
+  create a **pending proposal**; nothing changes until an editor applies it.
+  The model must return JSON with `find`/`replace` edits; each `find` must
+  occur exactly once and edits must not overlap, otherwise the whole answer is
+  rejected. Applying uses Yjs relative positions, so concurrent edits elsewhere
+  are kept; if the proposed lines were changed meanwhile, apply fails with
+  `409 proposal_conflict`. A version is saved before each apply. Commenters
+  may ask; editors apply.
+- *Charts:* "Ask AI: suggest chart" returns a validated chart configuration
+  (or a modification of an existing chart). It is a preview; nothing is saved
+  until a person clicks **Add this chart** / **Apply to chart**. Editors only.
+- A deterministic **simulated agent** (tidy, summary, replace) also exists and
+  needs no model.
+
+## AI configuration
+
+AI runs server-side in [src/worker/llm.ts](src/worker/llm.ts). Keys are read
+from the Worker environment and are never sent to the browser or included in
+error messages (provider error text is scrubbed). Put local settings in
+`.dev.vars` (git-ignored, not read by this documentation):
+
+| Variable | Meaning |
+|---|---|
+| `GEMINI_API_KEY` | Enables Gemini. |
+| `LLM_MODEL` | Gemini model; default `gemini-flash-lite-latest`. |
+| `GEMINI_MODELS` | Extra Gemini models to offer, comma-separated. |
+| `OPENROUTER_API_KEY` | Enables OpenRouter. |
+| `OPENROUTER_MODEL` | Default OpenRouter model (allowed even if paid). |
+| `OPENROUTER_MODELS` | Extra OpenRouter models to allow, comma-separated. |
+| `LLM_PROVIDER` | `gemini` or `openrouter`; otherwise the first configured key wins. |
+| `LLM_MOCK=1` | Deterministic stand-in model for offline use and tests; no key needed. |
+
+```sh
+# .dev.vars (example; use your own key)
+GEMINI_API_KEY=...
+# or
+OPENROUTER_API_KEY=...
+OPENROUTER_MODEL=<vendor>/<model>:free
+```
+
+- **Selector.** The page offers a provider and model picker (choice kept in
+  `localStorage`). `GET /api/ai/providers` lists providers, whether each is
+  configured, and models; it never returns a key.
+- **Gemini** uses `generateContent` with a JSON response schema.
+- **OpenRouter** uses chat completions with `response_format: json_object` and
+  a single model per request (no fallback list). Free models that advertise
+  tools and structured output are fetched from OpenRouter (cached 10 minutes).
+  **Only models ending in `:free` are accepted** unless the operator lists the
+  model in `OPENROUTER_MODEL` or `OPENROUTER_MODELS`; other model ids are
+  rejected with `model_not_allowed`.
+- Without a configured provider, AI endpoints answer `503 ai_not_configured`.
+- The code also contains an Anthropic provider (`ANTHROPIC_API_KEY`), which is
+  chosen first when its key is set and no provider is named. It is not offered
+  in the page's selector.
+- Model output is untrusted: it is parsed, schema-checked and, for charts,
+  range-checked before anything is shown or stored. Requests time out after 60 s.
+
+## Local setup and development
+
+Requirements: Node.js 22.18 or newer, npm 10 or 11. To add or upgrade
+packages use `npx npm@11 install <pkg>` (npm 10 crashes resolving this
+dependency tree).
+
+```sh
+npm install
+npm run dev        # Vite + Worker + Durable Objects at http://localhost:5180
+```
+
+State is kept in `.wrangler/state/` (one `.sqlite` file per cell); delete that
+folder to start empty. Port 5180 is fixed (`strictPort`).
+
+Seed sample data (document with typos, a sales sheet with two charts) into a
+running dev server:
+
+```sh
+npm run demo:seed   # BASE_URL=http://localhost:<port> if not 5180
+```
 
 | Command | What it does |
 |---|---|
-| `npm run dev` | Vite + Worker + Durable Objects on http://localhost:5180 |
-| `npm run typecheck` | Generates Worker types, then type-checks the client, Worker and Node code |
-| `npm test` | Tests inside workerd (routing, addressing, isolation, eviction/restart) and client tests with happy-dom (editor ↔ Y.Text binding) |
-| `npm run test:integration` | Starts the real dev server: restart persistence (`SIGTERM` and `SIGKILL`) and live sync between two clients |
-| `npm run test:e2e` | Playwright (Chromium) with two independent browsers: live sync, presence, reconnection, backend restart. First time: `npx playwright install chromium` |
-| `npm run test:all` | Typecheck + all test suites |
-| `npm run demo` | End-to-end demo with generated data against a running dev server |
-| `npm run build` | Production build into `dist/` (nothing is deployed) |
+| `npm run dev` | Dev server |
+| `npm run build` | Production build into `dist/` (not deployed) |
+| `npm run typecheck` | Generates Worker types, then type-checks client, Worker, Node and e2e code |
+| `npm run demo` | Command-line demo against a running dev server |
+| `npm run demo:seed` | Seed demo data |
 
-## API
+Requests act as a **test user** (`alice`, `bob`, `carol`) named by the
+`x-test-user` header, or `?user=` on the page URL and WebSockets. Default is
+`alice`. This is for exercising permissions; it is not authentication.
 
-| Method | Path | Cell |
-|---|---|---|
-| `GET` | `/api/health` | none (answered by the router) |
-| `GET` / `PUT` | `/api/workspaces/:workspaceId` | `WorkspaceCell` named `workspace:<workspaceId>` |
-| `GET` | `/api/workspaces/:workspaceId/docs` | `WorkspaceCell`: documents you may read, with folders and tags |
-| `GET` | `/api/workspaces/:workspaceId/search?q=&tag=&folder=` | `WorkspaceCell`: search titles, text and tags |
-| `GET` | `/api/workspaces/:workspaceId/trash` | `WorkspaceCell`: the Recycle Bin |
-| `POST` / `DELETE` | `/api/workspaces/:workspaceId/folders[/:folderId]` | `WorkspaceCell`: create a folder / delete an empty one |
-| `GET` / `PUT` / `DELETE` | `/api/workspaces/:workspaceId/docs/:docId` | `DocCell` named `doc:<workspaceId>/<docId>`, then `WorkspaceCell` to register it. `DELETE` moves it to the Recycle Bin |
-| `PUT` | `/api/workspaces/:workspaceId/docs/:docId/meta` | `WorkspaceCell`: folder and tags |
-| `POST` | `/api/workspaces/:workspaceId/docs/:docId/restore` | `DocCell`: out of the Recycle Bin |
-| `POST` | `/api/workspaces/:workspaceId/docs/:docId/purge` | `DocCell`: delete for good now (owner) |
-| `PUT` | `/api/workspaces/:workspaceId/docs/:docId/permissions` | `DocCell`: default role and per-user roles (owner) |
-| `GET` / `POST` | `/api/workspaces/:workspaceId/docs/:docId/comments` | `DocCell`: comment threads (optionally anchored to text) |
-| `POST` | `/api/workspaces/:workspaceId/docs/:docId/comments/:id/replies` and `/resolve` | `DocCell`: reply; resolve or reopen |
-| `GET` / `POST` | `/api/workspaces/:workspaceId/docs/:docId/proposals` | `DocCell`: list proposals / ask the simulated agent |
-| `POST` | `/api/workspaces/:workspaceId/docs/:docId/proposals/:id/apply` and `/discard` | `DocCell` (then `WorkspaceCell` after apply): review a proposal |
-| `GET` (WebSocket) | `/api/workspaces/:workspaceId/docs/:docId/sync` | `DocCell`: live Yjs sync of the body (existing docs only) |
-| `GET` | `/api/workspaces/:workspaceId/docs/:docId/versions[/:id]` | `DocCell`: versions, newest first / one version's full text |
-| `POST` | `/api/workspaces/:workspaceId/docs/:docId/versions/:id/restore` | `DocCell`, then `WorkspaceCell`: restore title and body |
+Ids use lowercase letters, digits and dashes (1–63 characters). Main routes
+(all under `/api/workspaces/:ws`): `docs[/:doc[/sync|versions|comments|proposals|permissions|meta|restore|purge]]`,
+`sheets[/:sheet[/sync|cells|charts[/:id|/suggest]|permissions]]`, `search`,
+`trash`, `folders`; plus `/api/health` and `/api/ai/providers`. See
+[src/worker/index.ts](src/worker/index.ts) for the complete routing table.
 
-Every request acts as a **test user**: `alice`, `bob` or `carol`, named in
-the `x-test-user` header (or `?user=` on the WebSocket); requests that name
-none act as `alice`. In the browser, add `?user=bob` to the page URL or use
-the switcher at the top. This is for testing permissions, not a login.
+## Testing
 
-Ids use lowercase letters, digits and dashes (1–63 characters).
-`GET` returns `404` until the resource has been written once. The document
-list is empty (not `404`) for a workspace with no documents, and workspaces do
-not need to be created before adding documents.
+| Command | Scope |
+|---|---|
+| `npm test` | Worker tests inside workerd with real bindings (routing, cells, permissions, sync, sheets, AI with the mock model and injected fetch) and client/shared tests in happy-dom |
+| `npm run test:integration` | Starts the real dev server: restart persistence and live sync between two clients |
+| `npm run test:e2e` | Playwright/Chromium with independent browsers (collaboration, comments and proposals, document management, sheets). First run: `npx playwright install chromium` |
+| `npm run test:all` | Typecheck plus all of the above |
 
-Every successful document read or write also registers the document in the
-catalogue. If that registration fails, the document is still saved and the
-response is `502` with code `catalogue_registration_failed`; retrying the
-request is safe. Documents saved before the catalogue existed appear in the
-list after they are read or saved once.
-Every response includes a `cell` object with the cell's name, Durable Object
-id and SQLite size, so you can see which cell answered.
+`npm test` sets `LLM_MOCK=1` and makes no network calls to model providers;
+tests do not need keys. Provider adapters are tested with a stubbed `fetch`.
+Calls to real Gemini or OpenRouter models are not part of the automated suite.
 
-```sh
-curl -X PUT localhost:5180/api/workspaces/demo/docs/intro \
-  -H 'content-type: application/json' -d '{"title":"Intro","body":"Hello"}'
-curl localhost:5180/api/workspaces/demo/docs/intro
-```
-
-## Verifying it yourself
-
-1. **Backend:** `curl localhost:5180/api/health`
-2. **Frontend:** open http://localhost:5180, check that it shows "Backend OK", then save a doc and
-   select it from the document list.
-3. **Cells:** `npm run demo`. Every line should say `PASS`, and the table shows a
-   different cell id per resource.
-4. **SQLite persistence:** save a doc, stop and restart `npm run dev`, then load
-   it again. Each cell's database is a separate file under
-   `.wrangler/state/v3/do/cell-docs-lab-DocCell/<id>.sqlite`, and you can read
-   it with `sqlite3 -readonly <file> "SELECT * FROM doc"`.
-5. **Collaboration:** open the same doc in two browser windows (or one normal
-   and one private window). Typing in one appears in the other; the line above
-   the editor shows "● Connected", whether your edits are saved, and who is
-   here. Click **Go offline** in one window: it shows "Offline (simulated)"
-   and "Not saved yet", stays editable, asks before you close the tab, and
-   the other window sees it leave. Click **Go back online**: the edits made
-   meanwhile appear in both and the status returns to "All changes saved".
-   Stopping `npm run dev` (press `q` then Enter in its terminal) and starting
-   it again does the same for both windows at once.
-6. **Recovery:**
-   - *Offline edits survive closing the tab:* click **Go offline**, type,
-     close the tab (choose **Leave**), open the doc again: the text is back
-     and the status goes from "Saving…" to "All changes saved".
-   - *Undo a bad edit:* click **Save doc**, delete most of the text, open
-     **Versions** and click **Restore** on the "Saved" entry. Every open
-     window gets the text back; the "Before a restore" entry undoes it.
-   - *Title autosave:* change the title; within a second it says "Saved"
-     and the document list shows the new title.
-7. **Documents and permissions:** see "Testing documents, permissions and the
-   Recycle Bin by hand" in [docs/architecture.md](docs/architecture.md).
+Documentation checks: there is no markdown linter or link checker in the
+project. Before committing README changes, verify that every command in the
+tables exists in `package.json` and that linked files exist.
 
 ## Project layout
 
 ```
-src/worker/index.ts            stateless router (Worker entry point)
-src/worker/register-doc.ts     catalogue registration: typed errors, retry, timeout (Effect)
-src/worker/addressing.ts       resource → cell name rules
-src/worker/cells/              WorkspaceCell, DocCell, Yjs sync protocol, cell bookkeeping
-src/shared/                    API types and schemas, save-check message, dummy data
-src/client/                    React page: editor, live session, presence, versions
-test/worker/                   tests that run inside workerd
-test/client/                   frontend tests (happy-dom)
-test/integration/              restart and live-sync tests against the real dev server
-test/e2e/                      Playwright tests with two browsers (sync, presence, recovery)
-scripts/demo.ts                command-line demo
-wrangler.jsonc                 bindings and SQLite migrations
+src/worker/        router, cells (WorkspaceCell, DocCell, SheetCell), Yjs sync, llm.ts, simulated agent
+src/shared/        API types, permissions, test users, formula engine and chart config
+src/client/        React UI: editor, presence, comments, proposals, sheet grid and charts, AI model picker
+test/worker/       tests inside workerd
+test/client/       frontend tests (happy-dom); test/shared/ runs with them
+test/integration/  real dev server: restart and sync
+test/e2e/          Playwright
+scripts/           demo and seed scripts
+docs/              architecture notes, celld smoke test
+wrangler.jsonc     bindings, migrations, vars
 ```
 
-## Roadmap
+## Current limitations
 
-1. Foundation: router, cells, per-cell SQLite, tests ✅
-2. Resource catalogue ✅ and document lifecycle
-3. Collaborative Markdown editing (Yjs, CodeMirror 6, WebSockets) and presence ✅
-4. Autosave, reconnect and recovery ✅
-5. Compatibility testing with the open-source celld runtime
-6. Documentation, CI and handover
-
-## Known limitations
-
-- No authentication: the test user is whatever the request says, so the
-  permissions show how enforcement works but protect nothing. Anyone who can
-  reach the server can act as any test user.
+- **No authentication.** The test user is whatever the request says. Anyone
+  who can reach the server can act as any user; permissions demonstrate
+  enforcement but protect nothing.
+- **Local only.** Verified on workerd; nothing is deployed to Cloudflare. A
+  first smoke test on celld passed without code changes
+  ([docs/celld-smoke-test.md](docs/celld-smoke-test.md)); it is not a full
+  compatibility run and predates sheets and AI.
+- **Spreadsheets are basic.** The formula set is the list above (no other
+  functions); cells are plain text with no formatting; last-writer-wins per
+  cell; sheets have no version history, comments, Recycle Bin, or delete/rename.
+- **Charts** are bar and line only, over single-column ranges of equal length;
+  non-numeric values plot as 0.
+- **AI proposals.** Document edits are whole-line proposals and stop applying
+  once someone edits one of those lines. Quality depends on the model; free
+  OpenRouter models may return invalid JSON, in which case the request fails
+  and nothing is proposed. Prompts include the whole document (or up to 400
+  cells for charts), so very large inputs are not handled specially. The
+  document body limit (100,000 characters) is checked on `PUT`, not on live
+  edits. There is no per-user rate limiting or usage tracking.
+- **Documents.** The title autosaves about a second after typing but is not
+  live; the last title saved wins. A document cannot be opened while offline
+  (only edits made while connected earlier). Local IndexedDB copies are never
+  cleaned up. A reader's delete-only change over a modified client is dropped
+  silently. Search is substring matching on the catalogue copy, which lags live
+  edits by about 2 seconds.
 - Reading a resource that was never written still creates an empty database
-  file for that cell, because the cell creates its tables when it starts.
-- Opening a document connects it to live sync, so body edits are saved and
-  shared without pressing Save. The title saves itself about a second after
-  you stop typing, but it is not live: other browsers see a new title when
-  they reload or reopen the document, and the last title saved wins.
-  `revision` counts saves (including title autosaves), not live body edits.
-- The body length limit (100,000 characters) is only checked on `PUT`, not on
-  live edits.
-- A reader's *delete-only* change on the live connection is dropped silently
-  rather than refused (their editor is read-only, so this only happens with
-  a modified client). Anything that adds text is refused and disconnects.
-- Search matches substrings in the catalogue's copy of each document, which
-  follows live edits within about 2 seconds.
-- The agent is simulated (deterministic tidy, summary and replace); no AI
-  model is involved. Proposed changes are whole lines, so a proposal no
-  longer applies once someone edits one of its lines (edits to other lines
-  are fine).
-- Edits made offline are kept in the browser (IndexedDB) and synced the next
-  time the document is opened online, but a document cannot be *opened*
-  while offline. Local copies are never cleaned up automatically.
-- Only verified locally. Nothing has been deployed to Cloudflare.
-- The client bundle is about 940 kB (about 310 kB gzipped), mostly CodeMirror,
-  the language packages that `@codemirror/lang-markdown` pulls in, and Yjs, so
-  `npm run build` warns about chunk size. Loading the editor lazily is deferred.
+  file for its cell.
+- The client bundle is large (about 940 kB, 310 kB gzipped), mostly
+  CodeMirror and Yjs, so `npm run build` warns about chunk size.
