@@ -20,12 +20,13 @@
 import { Effect } from "effect";
 import type { DocState, HealthResponse } from "../shared/api-types";
 import { DEFAULT_USER, isTestUser, TEST_USER_HEADER, TEST_USERS } from "../shared/users";
-import { docCellName, isValidId, workspaceCellName } from "./addressing";
+import { docCellName, isValidId, sheetCellName, workspaceCellName } from "./addressing";
 import { catalogueCopy } from "./catalogue-copy";
 import { CELL_NAME_HEADER, errorResponse, json, USER_HEADER } from "./http";
 import { registerInCatalogue } from "./register-doc";
 
 export { DocCell } from "./cells/doc-cell";
+export { SheetCell } from "./cells/sheet-cell";
 export { WorkspaceCell } from "./cells/workspace-cell";
 
 type Route =
@@ -34,6 +35,9 @@ type Route =
   | { type: "docs"; workspaceId: string }
   | { type: "doc"; workspaceId: string; docId: string }
   | { type: "doc-sync"; workspaceId: string; docId: string }
+  | { type: "sheets"; workspaceId: string }
+  | { type: "sheet-action"; workspaceId: string; sheetId: string; cellPath: string }
+  | { type: "sheet-sync"; workspaceId: string; sheetId: string }
   /** Another path on a DocCell. `register`: refresh the catalogue copy afterwards. */
   | { type: "doc-action"; workspaceId: string; docId: string; cellPath: string; register: boolean }
   /** Another path on the WorkspaceCell (Recycle Bin, search, folders, folder and tags of a doc). */
@@ -93,6 +97,19 @@ export function matchRoute(pathname: string): Route | null {
     }
     return null;
   }
+  if (section === "sheets") {
+    if (parts.length === 4) return { type: "sheets", workspaceId };
+    if (!isValidId(id)) return null;
+    const sheetId = id;
+    const sheet = (cellPath: string): Route => ({ type: "sheet-action", workspaceId, sheetId, cellPath });
+    if (parts.length === 5) return sheet("/");
+    if (parts.length === 6) {
+      if (action === "sync") return { type: "sheet-sync", workspaceId, sheetId };
+      if (action === "cells" || action === "permissions" || action === "charts") return sheet(`/${action}`);
+    }
+    if (parts.length === 7 && action === "charts" && /^[a-z0-9-]+$/.test(versionId)) return sheet(`/charts/${versionId}`);
+    return null;
+  }
   if ((section === "trash" || section === "search") && parts.length === 4) {
     return { type: "catalogue", workspaceId, cellPath: `/${section}` };
   }
@@ -144,6 +161,16 @@ export default {
         return route.register
           ? routeDoc(env, route.workspaceId, route.docId, request, user, route.cellPath)
           : forwardToCell(env.DOC_CELL, docCellName(route.workspaceId, route.docId), request, user, route.cellPath);
+      case "sheets":
+        return forwardToCell(env.WORKSPACE_CELL, workspaceCellName(route.workspaceId), request, user, "/sheets");
+      case "sheet-action":
+        return forwardToCell(env.SHEET_CELL, sheetCellName(route.workspaceId, route.sheetId), request, user, route.cellPath);
+      case "sheet-sync":
+        return callCell(env.SHEET_CELL, sheetCellName(route.workspaceId, route.sheetId), user, "/sync", {
+          method: "GET",
+          headers: { upgrade: request.headers.get("upgrade") ?? "" },
+          body: null,
+        });
       case "doc-sync":
         // WebSocket upgrade: only the Upgrade header is passed on, no body.
         return callCell(env.DOC_CELL, docCellName(route.workspaceId, route.docId), user, "/sync", {

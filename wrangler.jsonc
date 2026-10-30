@@ -20,14 +20,16 @@
   "durable_objects": {
     "bindings": [
       { "name": "WORKSPACE_CELL", "class_name": "WorkspaceCell" },
-      { "name": "DOC_CELL", "class_name": "DocCell" }
+      { "name": "DOC_CELL", "class_name": "DocCell" },
+      { "name": "SHEET_CELL", "class_name": "SheetCell" }
     ]
   },
 
   // `new_sqlite_classes` makes these Durable Objects SQLite-backed:
   // every instance gets its own private SQLite database.
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["WorkspaceCell", "DocCell"] }
+    { "tag": "v1", "new_sqlite_classes": ["WorkspaceCell", "DocCell"] },
+    { "tag": "v2", "new_sqlite_classes": ["SheetCell"] }
   ],
 
   // How long a deleted document stays in the Recycle Bin before it is erased
