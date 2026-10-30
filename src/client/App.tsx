@@ -12,6 +12,7 @@ import { connectDocSession, createDocSession, latestOnly, type ClosedReason, typ
 import { MarkdownEditor } from "./MarkdownEditor";
 import { PresenceBar } from "./PresenceBar";
 import { Proposals } from "./Proposals";
+import { SheetPanel } from "./SheetPanel";
 import { RecycleBin } from "./RecycleBin";
 import { useTitleAutosave, type TitleSaveState } from "./useTitleAutosave";
 import { VersionHistory } from "./VersionHistory";
@@ -27,6 +28,7 @@ export function App() {
       <UserSwitcher />
       <BackendStatus />
       <CellExplorer />
+      <SheetPanel workspaceId={urlParam("workspace") ?? "sample-workspace"} />
     </main>
   );
 }

@@ -1,7 +1,8 @@
 import { DurableObject } from "cloudflare:workers";
-import { AddChartRequest, SheetEditsRequest, UpdatePermissionsRequest, UpdateSheetRequest, type SheetState } from "../../shared/api-types";
+import { AddChartRequest, AiChartRequest, SheetEditsRequest, UpdatePermissionsRequest, UpdateSheetRequest, type SheetState } from "../../shared/api-types";
 import { allows, canManage, roleOf, type DocPermissions, type Role } from "../../shared/permissions";
 import { MAX_RAW_LENGTH, chartProblem, parseRef, type ChartConfig } from "../../shared/sheet";
+import { LlmError, suggestChart, type LlmEnv } from "../llm";
 import { parseCellName, workspaceCellName } from "../addressing";
 import { CELL_NAME_HEADER, errorResponse, json, readBody, requestUser } from "../http";
 import { addColumnIfMissing, cellInfo, claimCellName, createCellMetaTable, storedCellName } from "./cell-meta";
@@ -73,6 +74,7 @@ export class SheetCell extends DurableObject<Env> {
     }
     if (path === "/cells") return method === "POST" ? this.editCells(request, caller) : notAllowed();
     if (path === "/permissions") return method === "PUT" ? this.setPermissions(request, caller) : notAllowed();
+    if (path === "/charts/suggest") return method === "POST" ? this.suggest(request, caller) : notAllowed();
     if (path === "/charts") return method === "POST" ? this.addChart(request, caller) : notAllowed();
     const chart = /^\/charts\/([a-z0-9-]+)$/.exec(path);
     if (chart) return method === "DELETE" ? this.deleteChart(chart[1]!, caller) : notAllowed();
@@ -237,6 +239,27 @@ export class SheetCell extends DurableObject<Env> {
     this.sql.exec(`UPDATE sheet SET revision = revision + 1 WHERE id = 1`);
     this.broadcast({ type: "charts", charts: this.charts() });
     return json(chart, 201);
+  }
+
+  /**
+   * AI-assisted chart: the model proposes a chart config, which is validated
+   * and returned for a person to review. Nothing is saved until they add it
+   * (POST /charts), which checks it again.
+   */
+  private async suggest(request: Request, caller: Caller): Promise<Response> {
+    const row = this.access(caller, "edit");
+    if (row instanceof Response) return row;
+    const body = await readBody(request, AiChartRequest);
+    if (body instanceof Response) return body;
+    try {
+      const chart = await suggestChart(this.env as unknown as LlmEnv, body.instruction, this.cells());
+      const problem = chartProblem(chart);
+      if (problem) return errorResponse(502, "bad_model_output", `The model's chart was unusable: ${problem}`);
+      return json(chart);
+    } catch (error) {
+      if (error instanceof LlmError) return errorResponse(error.status, error.code, error.message);
+      throw error;
+    }
   }
 
   private deleteChart(id: string, caller: Caller): Response {

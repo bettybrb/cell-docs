@@ -12,7 +12,7 @@ export interface DevServer {
 
 export async function startDevServer(options: { port: number; stateDir: string }): Promise<DevServer> {
   const child = spawn("node_modules/.bin/vite", ["--port", String(options.port)], {
-    env: { ...process.env, CELL_DOCS_STATE_DIR: options.stateDir },
+    env: { ...process.env, CELL_DOCS_STATE_DIR: options.stateDir, CLOUDFLARE_INCLUDE_PROCESS_ENV: "true", LLM_MOCK: "1" },
     // Own process group, so stop() can terminate vite *and* its workerd child.
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],

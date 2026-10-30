@@ -82,6 +82,23 @@ export function applyEdits(text: string, edits: ReadonlyArray<{ find: string; re
   return out + text.slice(at);
 }
 
+const ChartOutput = Schema.Struct({
+  title: Schema.String,
+  type: Schema.Literals(["bar", "line"]),
+  labels: Schema.String,
+  series: Schema.Array(Schema.Struct({ name: Schema.String, range: Schema.String })),
+});
+
+const CHART_SYSTEM = `You design one chart for a spreadsheet. The user gives cells as "REF: raw" lines. Reply with ONLY a JSON object: {"title": string, "type": "bar" | "line", "labels": "A2:A7", "series": [{"name": string, "range": "B2:B7"}]}. Ranges are single-column A1 ranges of equal length covering data rows (not headers). Never include anything outside the JSON.`;
+
+/** Asks the model for a chart over the sheet; the caller must still validate the ranges (chartProblem). */
+export async function suggestChart(env: LlmEnv, instruction: string, cells: Record<string, string>, complete?: Complete) {
+  const lines = Object.entries(cells).slice(0, 400).map(([ref, raw]) => `${ref}: ${raw}`).join("\n");
+  const call = complete ?? pickProvider(env);
+  const out = validate(ChartOutput, parseJsonObject(await call(CHART_SYSTEM, `Request: ${instruction}\n\n<cells>\n${lines}\n</cells>`)));
+  return { title: out.title.slice(0, 80), type: out.type, labels: out.labels, series: [...out.series] };
+}
+
 export interface AiResult {
   proposed: string;
   summary: string;
@@ -136,6 +153,18 @@ export function anthropic(apiKey: string, model: string, fetchImpl: typeof fetch
  * (and be tested) without credentials or cost.
  */
 const mockModel: Complete = async (system, user) => {
+  if (system === CHART_SYSTEM) {
+    const refs = [...user.matchAll(/^([A-Z])(\d+): /gm)].map((m) => ({ col: m[1]!, row: Number(m[2]) }));
+    const last = Math.max(...refs.map((r) => r.row), 2);
+    const cols = [...new Set(refs.map((r) => r.col))].sort();
+    const header = (col: string) => /^[A-Z]1: (.*)$/m.exec(user.replace(new RegExp(`^(?!${col}1: ).*\\n?`, "gm"), ""))?.[1] ?? col;
+    return JSON.stringify({
+      title: /line/i.test(user) ? "Trend" : "Overview",
+      type: /line|trend/i.test(user) ? "line" : "bar",
+      labels: `${cols[0]}2:${cols[0]}${last}`,
+      series: cols.slice(1, 3).map((col) => ({ name: header(col), range: `${col}2:${col}${last}` })),
+    });
+  }
   const doc = /<document>\n([\s\S]*)\n<\/document>/.exec(user)?.[1] ?? "";
   if (system === SYSTEM.summarise) {
     const bullets = doc

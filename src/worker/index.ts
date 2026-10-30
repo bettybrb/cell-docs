@@ -107,6 +107,7 @@ export function matchRoute(pathname: string): Route | null {
       if (action === "sync") return { type: "sheet-sync", workspaceId, sheetId };
       if (action === "cells" || action === "permissions" || action === "charts") return sheet(`/${action}`);
     }
+    if (parts.length === 7 && action === "charts" && versionId === "suggest") return sheet("/charts/suggest");
     if (parts.length === 7 && action === "charts" && /^[a-z0-9-]+$/.test(versionId)) return sheet(`/charts/${versionId}`);
     return null;
   }

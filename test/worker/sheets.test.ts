@@ -77,4 +77,15 @@ describe("sheet cell", () => {
     const del = await api<SheetState>("DELETE", `${path}/charts/${state.charts[0]!.id}`, undefined, "alice");
     expect(del.data.charts).toEqual([]);
   });
+
+  it("AI suggests a chart for review; nothing is saved until it is added", async () => {
+    const { path } = await newSheet({ A1: "Month", B1: "Revenue", C1: "Cost", A2: "Jan", B2: "10", C2: "4", A3: "Feb", B3: "12", C3: "5" });
+    const s = await api<any>("POST", `${path}/charts/suggest`, { instruction: "line chart of revenue" }, "alice");
+    expect(s.status).toBe(200);
+    expect(s.data).toMatchObject({ type: "line", labels: "A2:A3", series: [{ name: "Revenue", range: "B2:B3" }, { name: "Cost", range: "C2:C3" }] });
+    expect((await api<SheetState>("GET", path)).data.charts).toEqual([]);
+    expect((await api("POST", `${path}/charts`, s.data, "alice")).status).toBe(201);
+    await api("PUT", `${path}/permissions`, { defaultRole: "read", users: {} }, "alice");
+    expect((await api("POST", `${path}/charts/suggest`, { instruction: "x" }, "bob")).status).toBe(403);
+  });
 });
