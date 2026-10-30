@@ -23,6 +23,7 @@ import { DEFAULT_USER, isTestUser, TEST_USER_HEADER, TEST_USERS } from "../share
 import { docCellName, isValidId, sheetCellName, workspaceCellName } from "./addressing";
 import { catalogueCopy } from "./catalogue-copy";
 import { CELL_NAME_HEADER, errorResponse, json, USER_HEADER } from "./http";
+import { listProviders, type LlmEnv } from "./llm";
 import { registerInCatalogue } from "./register-doc";
 
 export { DocCell } from "./cells/doc-cell";
@@ -31,6 +32,7 @@ export { WorkspaceCell } from "./cells/workspace-cell";
 
 type Route =
   | { type: "health" }
+  | { type: "ai-providers" }
   | { type: "workspace"; workspaceId: string }
   | { type: "docs"; workspaceId: string }
   | { type: "doc"; workspaceId: string; docId: string }
@@ -45,6 +47,7 @@ type Route =
 
 export function matchRoute(pathname: string): Route | null {
   if (pathname === "/api/health") return { type: "health" };
+  if (pathname === "/api/ai/providers") return { type: "ai-providers" };
 
   const parts = pathname.split("/").filter(Boolean); // ["api", "workspaces", ...]
   if (parts[0] !== "api" || parts[1] !== "workspaces") return null;
@@ -145,6 +148,7 @@ export default {
       const body: HealthResponse = { ok: true, service: "cell-docs-lab", time: new Date().toISOString() };
       return json(body);
     }
+    if (route.type === "ai-providers") return json(await listProviders(env as unknown as LlmEnv));
     const user = identify(request, url);
     if (user instanceof Response) return user;
 

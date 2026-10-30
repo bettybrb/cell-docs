@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DocState, Proposal } from "../../src/shared/api-types";
-import { LlmError, anthropic, gemini, scrub, applyEdits, interpret, runAi } from "../../src/worker/llm";
+import { LlmError, anthropic, freeCapableModels, gemini, listProviders, openrouter, openRouterAllowed, pickProvider, scrub, applyEdits, interpret, runAi } from "../../src/worker/llm";
 import { api, uniqueId } from "./helpers";
 
 const TEXT = "Intro line.\nThe teh cat sat.\nEnd.\n";
@@ -101,6 +101,70 @@ describe("llm output validation", () => {
     }) as unknown as typeof fetch;
     await anthropic("k", "m", fake)("sys", "usr");
     expect(seen).toMatchObject({ url: "https://api.anthropic.com/v1/messages", key: "k", body: { model: "m", system: "sys" } });
+  });
+});
+
+describe("OpenRouter and provider selection", () => {
+  it("calls OpenRouter with one model, the key in a header, and validates the reply", async () => {
+    let seen: { url: string; auth: string | null; body: any } | undefined;
+    const fake = (async (url: string, init: RequestInit) => {
+      seen = { url, auth: new Headers(init.headers).get("authorization"), body: JSON.parse(init.body as string) };
+      return Response.json({ choices: [{ message: { content: '{"summary":"s","edits":[]}' } }] });
+    }) as unknown as typeof fetch;
+    expect(await openrouter("sk-or-k", "meta/x:free", fake)("sys", "usr")).toBe('{"summary":"s","edits":[]}');
+    expect(seen!.url).toBe("https://openrouter.ai/api/v1/chat/completions");
+    expect(seen!.auth).toBe("Bearer sk-or-k");
+    expect(seen!.body.model).toBe("meta/x:free");
+    expect(seen!.body.models).toBeUndefined(); // no fallback list: never moves to another model
+    await expect(runAi({}, "edit", "x", "t", openrouter("k", "m/x:free", (async () => Response.json({ choices: [{ message: { content: '{"summary":"s"}' } }] })) as unknown as typeof fetch))).rejects.toMatchObject({ code: "bad_model_output" });
+  });
+  it("explains OpenRouter rate limits, unavailable models and in-body errors without leaking the key", async () => {
+    const respond = (status: number, body: unknown) => (async () => new Response(JSON.stringify(body), { status })) as unknown as typeof fetch;
+    const limited = await openrouter("sk-or-secretsecret1", "m/x:free", respond(429, { error: { message: "rate limited sk-or-secretsecret1" } }))("s", "u").catch((e) => e);
+    expect(limited.message).toMatch(/OpenRouter \(m\/x:free\) request failed \(429\).*rate limit.*another model/);
+    expect(limited.message).not.toContain("secretsecret1");
+    const gone = await openrouter("k", "m/x:free", respond(404, { error: { message: "No endpoints found" } }))("s", "u").catch((e) => e);
+    expect(gone.message).toMatch(/\(404\).*pick another model/);
+    const inBody = await openrouter("k", "m/x:free", respond(200, { error: { code: 502, message: "upstream down" } }))("s", "u").catch((e) => e);
+    expect(inBody).toMatchObject({ code: "model_error", message: /upstream down/ });
+  });
+  it("only allows free OpenRouter models unless the operator lists a paid one", async () => {
+    const env = { OPENROUTER_API_KEY: "k" };
+    expect(openRouterAllowed(env, "meta/llama:free")).toBe(true);
+    expect(openRouterAllowed(env, "openai/gpt-5")).toBe(false);
+    expect(openRouterAllowed({ ...env, OPENROUTER_MODELS: "openai/gpt-5" }, "openai/gpt-5")).toBe(true);
+    expect(() => pickProvider(env, { provider: "openrouter", model: "openai/gpt-5" })).toThrow(/not an allowed OpenRouter model/);
+    expect(() => pickProvider(env, { provider: "openrouter" })).toThrow(/Choose an OpenRouter model/);
+    expect(() => pickProvider({}, { provider: "openrouter", model: "a/b:free" })).toThrow(/OPENROUTER_API_KEY/);
+    expect(() => pickProvider({ LLM_PROVIDER: "openrouter", GEMINI_API_KEY: "g" }, { provider: "gemini" })).not.toThrow();
+  });
+  it("lists only free models that support structured output and tools; no key in the listing", async () => {
+    expect(
+      freeCapableModels([
+        { id: "a/ok:free", supported_parameters: ["tools", "structured_outputs"] },
+        { id: "a/notools:free", supported_parameters: ["structured_outputs"] },
+        { id: "a/nostruct:free", supported_parameters: ["tools"] },
+        { id: "a/paid", pricing: { prompt: "0.1", completion: "0.2" }, supported_parameters: ["tools", "structured_outputs"] },
+        { id: "a/zero", pricing: { prompt: "0", completion: "0" }, supported_parameters: ["tools", "response_format"] },
+      ]),
+    ).toEqual(["a/ok:free", "a/zero"]);
+    // Before the success below: a good answer is cached for a few minutes.
+    const down = await listProviders({ OPENROUTER_API_KEY: "k", OPENROUTER_MODELS: "q/x:free" }, (async () => { throw new Error("offline"); }) as unknown as typeof fetch);
+    expect(down.providers.find((p) => p.id === "openrouter")).toMatchObject({ models: ["q/x:free"], note: expect.stringMatching(/Could not fetch/) });
+    const fetchStub = (async () => Response.json({ data: [{ id: "z/free-one:free", supported_parameters: ["tools", "structured_outputs"] }] })) as unknown as typeof fetch;
+    const out = await listProviders({ GEMINI_API_KEY: "gem-secret", OPENROUTER_API_KEY: "or-secret", OPENROUTER_MODEL: "z/default:free" }, fetchStub);
+    expect(out.providers.find((p) => p.id === "openrouter")).toMatchObject({ configured: true, models: expect.arrayContaining(["z/free-one:free", "z/default:free"]) });
+    expect(out.providers.find((p) => p.id === "gemini")!.configured).toBe(true);
+    expect(JSON.stringify(out)).not.toMatch(/secret/);
+  });
+  it("accepts the picked provider on proposals and chart suggestions (mock model), rejects unknown providers", async () => {
+    const path = await newDoc();
+    const ok = await api<Proposal>("POST", `${path}/proposals`, { action: "ai", mode: "edit", instruction: "replace teh with the", provider: "openrouter", model: "mock/free-model:free" }, "alice");
+    expect(ok.status).toBe(201);
+    expect((await api("POST", `${path}/proposals`, { action: "ai", mode: "edit", instruction: "x", provider: "evil" }, "alice")).status).toBe(400);
+    const providers = await api<any>("GET", "/api/ai/providers");
+    expect(providers.status).toBe(200);
+    expect(providers.data.providers.map((p: any) => p.id)).toEqual(["gemini", "openrouter"]);
   });
 });
 

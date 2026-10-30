@@ -676,7 +676,7 @@ export class DocCell extends DurableObject<Env> {
     if (ask.action === "ai") {
       if (ask.mode === "edit" && ask.instruction.trim() === "") return errorResponse(422, "instruction_required", "Say what to change.");
       try {
-        proposed = (await runAi(this.env as unknown as LlmEnv, ask.mode, ask.instruction, base)).proposed;
+        proposed = (await runAi(this.env as unknown as LlmEnv, ask.mode, ask.instruction, base, undefined, { provider: ask.provider, model: ask.model })).proposed;
       } catch (error) {
         if (error instanceof LlmError) return errorResponse(error.status, error.code, error.message);
         throw error;

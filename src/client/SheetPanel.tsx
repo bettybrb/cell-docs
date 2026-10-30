@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { SheetEntry, SheetList, SheetState } from "../shared/api-types";
 import { allows } from "../shared/permissions";
 import { chartData, colName, display, evaluateSheet, type ChartConfig, type ChartData } from "../shared/sheet";
+import { AiModelPicker, useAiChoice } from "./AiModelPicker";
 import { api } from "./api";
 import { currentUser } from "./current-user";
 
@@ -199,6 +200,7 @@ function Charts({ workspaceId, sheetId, state, canEdit }: { workspaceId: string;
   const [suggestion, setSuggestion] = useState<{ chart: Omit<ChartConfig, "id">; replaces: string | null } | null>(null);
   const [target, setTarget] = useState("");
   const [message, setMessage] = useState<string | null>(null);
+  const aiChoice = useAiChoice();
 
   const add = async (chart: Omit<ChartConfig, "id">) => {
     const r = await api.addChart(workspaceId, sheetId, chart);
@@ -215,7 +217,7 @@ function Charts({ workspaceId, sheetId, state, canEdit }: { workspaceId: string;
   const suggest = async () => {
     setMessage("AI is working…");
     const replaces = state.charts.some((c) => c.id === target) ? target : null;
-    const r = await api.suggestChart(workspaceId, sheetId, instruction, replaces ?? undefined);
+    const r = await api.suggestChart(workspaceId, sheetId, instruction, replaces ?? undefined, aiChoice);
     setMessage(r.ok ? "AI suggestion below: review it, then apply it." : r.error.message);
     if (r.ok) setSuggestion({ chart: r.data, replaces });
   };
@@ -226,6 +228,7 @@ function Charts({ workspaceId, sheetId, state, canEdit }: { workspaceId: string;
       <h3>Charts</h3>
       {canEdit && (
         <>
+          <AiModelPicker />
           <div className="inline">
             <input aria-label="AI chart request" placeholder="Describe a chart, or how to change one…" value={instruction} onChange={(e) => setInstruction(e.target.value)} size={40} />
             {state.charts.length > 0 && (

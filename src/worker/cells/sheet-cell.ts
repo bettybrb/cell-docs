@@ -254,7 +254,7 @@ export class SheetCell extends DurableObject<Env> {
     try {
       const existing = body.chartId ? this.charts().find((c) => c.id === body.chartId) : undefined;
       if (body.chartId && !existing) return errorResponse(404, "chart_not_found", "That chart no longer exists.");
-      const chart = await suggestChart(this.env as unknown as LlmEnv, body.instruction, this.cells(), undefined, existing);
+      const chart = await suggestChart(this.env as unknown as LlmEnv, body.instruction, this.cells(), undefined, existing, { provider: body.provider, model: body.model });
       const problem = chartProblem(chart);
       if (problem) return errorResponse(502, "bad_model_output", `The model's chart was unusable: ${problem}`);
       return json(chart);

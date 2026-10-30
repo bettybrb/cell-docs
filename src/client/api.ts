@@ -17,6 +17,7 @@ import type {
   DocVersionList,
   Folder,
   HealthResponse,
+  ProvidersResponse,
   SearchResults,
   TrashList,
   UpdateDocMetaRequest,
@@ -28,6 +29,9 @@ import type {
 import type { ChartConfig } from "../shared/sheet";
 import { TEST_USER_HEADER } from "../shared/users";
 import { currentUser } from "./current-user";
+
+/** The provider and model picked in the AI controls (sent with each AI request). */
+export type AiChoice = { provider?: "gemini" | "openrouter"; model?: string };
 
 /** Result of an API call: either data or the server's structured error. */
 export type ApiResult<T> = { ok: true; status: number; data: T } | { ok: false; status: number; error: ApiError["error"] };
@@ -62,8 +66,9 @@ export const api = {
     call<ChartConfig>("POST", `${sheet(workspaceId, sheetId)}/charts`, chart),
   deleteChart: (workspaceId: string, sheetId: string, chartId: string) =>
     call<SheetState>("DELETE", `${sheet(workspaceId, sheetId)}/charts/${chartId}`),
-  suggestChart: (workspaceId: string, sheetId: string, instruction: string, chartId?: string) =>
-    call<Omit<ChartConfig, "id">>("POST", `${sheet(workspaceId, sheetId)}/charts/suggest`, { instruction, ...(chartId ? { chartId } : {}) }),
+  suggestChart: (workspaceId: string, sheetId: string, instruction: string, chartId?: string, choice: AiChoice = {}) =>
+    call<Omit<ChartConfig, "id">>("POST", `${sheet(workspaceId, sheetId)}/charts/suggest`, { instruction, ...(chartId ? { chartId } : {}), ...choice }),
+  aiProviders: () => call<ProvidersResponse>("GET", "/api/ai/providers"),
   updateChart: (workspaceId: string, sheetId: string, chartId: string, chart: Omit<ChartConfig, "id">) =>
     call<ChartConfig>("PUT", `${sheet(workspaceId, sheetId)}/charts/${chartId}`, chart),
 

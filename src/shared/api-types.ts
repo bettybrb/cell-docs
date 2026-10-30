@@ -292,6 +292,24 @@ export type ReplyRequest = typeof ReplyRequest.Type;
 export const ResolveRequest = Schema.Struct({ resolved: Schema.Boolean });
 export type ResolveRequest = typeof ResolveRequest.Type;
 
+/** One provider in the AI model selector (never contains a key). */
+export interface ProviderInfo {
+  id: "gemini" | "openrouter";
+  label: string;
+  configured: boolean;
+  models: string[];
+  /** Why the model list may be incomplete (e.g. OpenRouter unreachable). */
+  note?: string;
+}
+export interface ProvidersResponse {
+  providers: ProviderInfo[];
+  /** What a request uses when the page picks nothing. */
+  current: { provider: string; model: string | null };
+}
+
+/** Providers a page may pick; the keys stay in the Worker. */
+export const AiProvider = Schema.Literals(["gemini", "openrouter"]);
+
 /** What to ask the simulated agent for. */
 export const ProposalRequest = Schema.Union([
   Schema.Struct({ action: Schema.Literal("tidy") }),
@@ -301,6 +319,8 @@ export const ProposalRequest = Schema.Union([
     action: Schema.Literal("ai"),
     mode: Schema.Literals(["edit", "summarise"]),
     instruction: Schema.String.check(Schema.isMaxLength(1_000)),
+    provider: Schema.optionalKey(AiProvider),
+    model: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(120))),
   }),
   Schema.Struct({
     action: Schema.Literal("replace"),
@@ -338,6 +358,8 @@ export const AiChartRequest = Schema.Struct({
   instruction: Schema.String.check(Schema.isMaxLength(500), nonBlank("instruction")),
   /** Id of an existing chart to modify instead of designing a new one. */
   chartId: Schema.optionalKey(Schema.String),
+  provider: Schema.optionalKey(AiProvider),
+  model: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(120))),
 });
 
 export const CreateFolderRequest = Schema.Struct({

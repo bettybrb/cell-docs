@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import type { ProviderInfo, ProvidersResponse } from "../shared/api-types";
 import type { ChartConfig } from "../shared/sheet";
 
 /** Secrets and settings for the model; the key lives only in the Worker's env (.dev.vars / wrangler secret). */
@@ -10,6 +11,18 @@ export interface LlmEnv {
   /** "1" uses a deterministic stand-in model, for tests and offline demos. */
   LLM_MOCK?: string;
   LLM_MODEL?: string;
+  OPENROUTER_API_KEY?: string;
+  /** Default OpenRouter model, and any extra models (comma-separated) to offer; paid ones only if listed here. */
+  OPENROUTER_MODEL?: string;
+  OPENROUTER_MODELS?: string;
+  /** Extra Gemini models (comma-separated) to offer. */
+  GEMINI_MODELS?: string;
+}
+
+/** A provider and model picked in the UI; either part may be missing (the server default applies). */
+export interface LlmChoice {
+  provider?: "gemini" | "openrouter";
+  model?: string;
 }
 
 export type AiMode = "edit" | "summarise";
@@ -124,9 +137,9 @@ const ChartOutput = Schema.Struct({
 const CHART_SYSTEM = `You design one chart for a spreadsheet and MUST follow the user's request exactly: use the chart type, orientation, columns, rows and title the user asks for, and only add or drop series when they ask. If the request names columns or headers, use those columns. The user gives cells as "REF: raw" lines. Reply with ONLY a JSON object: {"title": string, "type": "bar" | "line", "orientation": "vertical" | "horizontal", "labels": "A2:A7", "series": [{"name": string, "range": "B2:B7"}]}. Use "horizontal" only for bar charts the user wants horizontal (otherwise "vertical"). Ranges are single-column A1 ranges of equal length covering data rows (not headers); a series name is its column header. If a current chart is given, return the full modified chart: keep everything the user did not ask to change. Never include anything outside the JSON.`;
 
 /** Asks the model for a chart over the sheet (or a modified `existing` chart); the caller must still validate the ranges (chartProblem). */
-export async function suggestChart(env: LlmEnv, instruction: string, cells: Record<string, string>, complete?: Complete, existing?: Omit<ChartConfig, "id">) {
+export async function suggestChart(env: LlmEnv, instruction: string, cells: Record<string, string>, complete?: Complete, existing?: Omit<ChartConfig, "id">, choice?: LlmChoice) {
   const lines = Object.entries(cells).slice(0, 400).map(([ref, raw]) => `${ref}: ${raw}`).join("\n");
-  const call = complete ?? pickProvider(env);
+  const call = complete ?? pickProvider(env, choice);
   const current = existing ? `\n\n<current_chart>\n${JSON.stringify({ title: existing.title, type: existing.type, orientation: existing.orientation ?? "vertical", labels: existing.labels, series: existing.series })}\n</current_chart>` : "";
   const out = validate(ChartOutput, parseJsonObject(await call(CHART_SYSTEM, `Request: ${instruction}${current}\n\n<cells>\n${lines}\n</cells>`, CHART_JSON_SCHEMA)), "title, type, labels, series");
   return {
@@ -159,23 +172,115 @@ export function interpret(mode: AiMode, text: string, raw: string): AiResult {
   return { proposed: applyEdits(text, out.edits), summary: out.summary };
 }
 
-export async function runAi(env: LlmEnv, mode: AiMode, instruction: string, text: string, complete?: Complete): Promise<AiResult> {
+export async function runAi(env: LlmEnv, mode: AiMode, instruction: string, text: string, complete?: Complete, choice?: LlmChoice): Promise<AiResult> {
   if (mode === "summarise" && !text.trim()) throw new LlmError("empty_document", "The document is empty, so there is nothing to summarise.", 422);
   const user = mode === "edit" ? `Instruction: ${instruction}\n\n<document>\n${text}\n</document>` : `<document>\n${text}\n</document>`;
-  const call = complete ?? pickProvider(env);
+  const call = complete ?? pickProvider(env, choice);
   return interpret(mode, text, await call(SYSTEM[mode], user, mode === "edit" ? EDIT_JSON_SCHEMA : SUMMARY_JSON_SCHEMA));
 }
 
-function pickProvider(env: LlmEnv): Complete {
+const GEMINI_DEFAULT = "gemini-flash-lite-latest";
+const OPENROUTER_PAID_HINT = "Only free OpenRouter models (ids ending in :free) are used unless the server lists a model in OPENROUTER_MODELS.";
+
+const csv = (value?: string) => (value ?? "").split(",").map((m) => m.trim()).filter(Boolean);
+
+/** An OpenRouter model may be used if it is free, or the server operator listed it explicitly. */
+export function openRouterAllowed(env: LlmEnv, model: string): boolean {
+  return /^[\w.~-]+\/[\w.:~-]+$/.test(model) && (model.endsWith(":free") || csv(env.OPENROUTER_MODELS).includes(model) || model === env.OPENROUTER_MODEL);
+}
+
+export function pickProvider(env: LlmEnv, choice: LlmChoice = {}): Complete {
   if (env.LLM_MOCK === "1") return mockModel;
-  const provider = env.LLM_PROVIDER ?? (env.ANTHROPIC_API_KEY ? "anthropic" : env.GEMINI_API_KEY ? "gemini" : "anthropic");
+  const provider = choice.provider ?? env.LLM_PROVIDER ?? (env.ANTHROPIC_API_KEY ? "anthropic" : env.GEMINI_API_KEY ? "gemini" : env.OPENROUTER_API_KEY ? "openrouter" : "anthropic");
   if (provider === "gemini") {
     if (!env.GEMINI_API_KEY) throw new LlmError("ai_not_configured", "No GEMINI_API_KEY is configured on the server.", 503);
-    return gemini(env.GEMINI_API_KEY, env.LLM_MODEL ?? "gemini-flash-lite-latest");
+    return gemini(env.GEMINI_API_KEY, choice.model || env.LLM_MODEL || GEMINI_DEFAULT);
   }
-  if (provider !== "anthropic") throw new LlmError("ai_not_configured", `Unknown LLM_PROVIDER “${provider}”; use anthropic or gemini.`, 503);
+  if (provider === "openrouter") {
+    if (!env.OPENROUTER_API_KEY) throw new LlmError("ai_not_configured", "No OPENROUTER_API_KEY is configured on the server.", 503);
+    const model = choice.model ?? env.OPENROUTER_MODEL;
+    if (!model) throw new LlmError("model_required", "Choose an OpenRouter model first.", 422);
+    if (!openRouterAllowed(env, model)) throw new LlmError("model_not_allowed", `“${model.slice(0, 80)}” is not an allowed OpenRouter model. ${OPENROUTER_PAID_HINT}`, 422);
+    return openrouter(env.OPENROUTER_API_KEY, model);
+  }
+  if (provider !== "anthropic") throw new LlmError("ai_not_configured", `Unknown LLM_PROVIDER “${provider}”; use anthropic, gemini or openrouter.`, 503);
   if (!env.ANTHROPIC_API_KEY) throw new LlmError("ai_not_configured", "No ANTHROPIC_API_KEY or GEMINI_API_KEY is configured on the server.", 503);
   return anthropic(env.ANTHROPIC_API_KEY, env.LLM_MODEL ?? "claude-sonnet-5-5");
+}
+
+/** OpenRouter (OpenAI-style chat completions). One model, no `models` fallback list, so a request never moves to another (possibly paid) model. */
+export function openrouter(apiKey: string, model: string, fetchImpl: typeof fetch = fetch): Complete {
+  return async (system, user) => {
+    const data = (await post(
+      `OpenRouter (${model})`,
+      "https://openrouter.ai/api/v1/chat/completions",
+      { authorization: `Bearer ${apiKey}` },
+      {
+        model,
+        max_tokens: 4096,
+        response_format: { type: "json_object" },
+        messages: [{ role: "system", content: system }, { role: "user", content: user }],
+      },
+      apiKey,
+      fetchImpl,
+    )) as { choices?: Array<{ message?: { content?: string | null } }>; error?: { message?: string; code?: number | string } };
+    // OpenRouter can answer 200 with an error body (e.g. the upstream provider failed).
+    if (data.error) throw new LlmError("model_error", `OpenRouter (${model}) failed${data.error.code ? ` (${data.error.code})` : ""}: ${scrub(data.error.message ?? "", apiKey)}`);
+    const reply = data.choices?.[0]?.message?.content;
+    if (!reply) throw new LlmError("bad_model_output", "The model returned no text.");
+    return reply;
+  };
+}
+
+interface OpenRouterModel {
+  id: string;
+  pricing?: { prompt?: string; completion?: string };
+  supported_parameters?: string[];
+}
+
+/** Free models that can return structured output and call tools. */
+export function freeCapableModels(models: OpenRouterModel[]): string[] {
+  return models
+    .filter((m) => {
+      const params = m.supported_parameters ?? [];
+      const free = m.id.endsWith(":free") || (Number(m.pricing?.prompt) === 0 && Number(m.pricing?.completion) === 0 && m.pricing?.prompt !== undefined);
+      return free && params.includes("tools") && (params.includes("structured_outputs") || params.includes("response_format"));
+    })
+    .map((m) => m.id)
+    .sort();
+}
+
+let modelCache: { at: number; ids: string[] } | undefined;
+const MODEL_CACHE_MS = 10 * 60_000;
+
+async function openRouterModels(fetchImpl: typeof fetch): Promise<string[]> {
+  if (modelCache && Date.now() - modelCache.at < MODEL_CACHE_MS) return modelCache.ids;
+  const response = await fetchImpl("https://openrouter.ai/api/v1/models", { signal: AbortSignal.timeout(10_000) });
+  if (!response.ok) throw new Error(`status ${response.status}`);
+  const ids = freeCapableModels(((await response.json()) as { data?: OpenRouterModel[] }).data ?? []);
+  modelCache = { at: Date.now(), ids };
+  return ids;
+}
+
+/** What the page's provider/model selector offers. Never contains a key. */
+export async function listProviders(env: LlmEnv, fetchImpl: typeof fetch = fetch): Promise<ProvidersResponse> {
+  const mock = env.LLM_MOCK === "1";
+  const gemModels = [...new Set([env.LLM_MODEL && env.LLM_PROVIDER !== "openrouter" ? env.LLM_MODEL : GEMINI_DEFAULT, ...csv(env.GEMINI_MODELS)])];
+  const extra = [...csv(env.OPENROUTER_MODELS), ...(env.OPENROUTER_MODEL ? [env.OPENROUTER_MODEL] : [])];
+  let note: string | undefined;
+  let fetched: string[] = [];
+  if (mock) fetched = ["mock/free-model:free"];
+  else if (env.OPENROUTER_API_KEY) {
+    try {
+      fetched = await openRouterModels(fetchImpl);
+    } catch {
+      note = "Could not fetch the OpenRouter model list; showing configured models only.";
+    }
+  }
+  const router: ProviderInfo = { id: "openrouter", label: "OpenRouter", configured: mock || !!env.OPENROUTER_API_KEY, models: [...new Set([...fetched, ...extra])], ...(note ? { note } : {}) };
+  const gem: ProviderInfo = { id: "gemini", label: "Gemini", configured: mock || !!env.GEMINI_API_KEY, models: gemModels };
+  const provider = env.LLM_PROVIDER ?? (env.GEMINI_API_KEY ? "gemini" : env.OPENROUTER_API_KEY ? "openrouter" : "gemini");
+  return { providers: [gem, router], current: { provider, model: provider === "openrouter" ? (env.OPENROUTER_MODEL ?? null) : (env.LLM_MODEL ?? GEMINI_DEFAULT) } };
 }
 
 export function gemini(apiKey: string, model: string, fetchImpl: typeof fetch = fetch): Complete {
@@ -230,7 +335,7 @@ async function post(provider: string, url: string, headers: Record<string, strin
     } catch {
       /* no JSON body */
     }
-    const hint = response.status === 404 ? " (the model may be retired or misspelled: set LLM_MODEL)" : response.status === 429 ? " (rate limit or quota reached)" : response.status === 401 || response.status === 403 ? " (check the API key)" : "";
+    const hint = response.status === 404 ? " (the model may be retired, misspelled or not available to you: pick another model, or set LLM_MODEL)" : response.status === 429 ? " (rate limit or quota reached: wait a moment or pick another model; nothing was switched automatically)" : response.status === 401 || response.status === 403 ? " (check the API key)" : "";
     throw new LlmError("model_error", `${provider} request failed (${response.status})${hint}${reason ? `: ${reason}` : ""}`);
   }
   return response.json();

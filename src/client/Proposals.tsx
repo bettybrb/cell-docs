@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import type { DocState, Proposal, ProposalRequest } from "../shared/api-types";
 import { allows, type EffectiveRole } from "../shared/permissions";
 import { api } from "./api";
+import { AiModelPicker, useAiChoice } from "./AiModelPicker";
 import { currentUser } from "./current-user";
 import type { ConnectedDocSession } from "./doc-session";
 
@@ -37,6 +38,7 @@ export function Proposals({
   const [message, setMessage] = useState<string | null>(null);
   const [instruction, setInstruction] = useState("");
   const [busy, setBusy] = useState(false);
+  const aiChoice = useAiChoice();
   const canAsk = role !== null && allows(role, "comment");
   const canApply = role !== null && allows(role, "edit");
 
@@ -94,6 +96,7 @@ export function Proposals({
     <details className="wide panel" data-testid="proposals" open>
       <summary>Agent proposals ({pending} waiting)</summary>
       <p className="muted">A simulated agent (no AI model): it proposes a change, and nothing changes until someone applies it.</p>
+      <AiModelPicker />
       <div className="inline" data-testid="ai-agent">
         <input
           aria-label="AI instruction"
@@ -104,12 +107,12 @@ export function Proposals({
           size={36}
         />
         <button
-          onClick={() => ask({ action: "ai", mode: "edit", instruction })}
+          onClick={() => ask({ action: "ai", mode: "edit", instruction, ...aiChoice })}
           disabled={!canAsk || busy || instruction.trim() === ""}
         >
           Ask AI: edit
         </button>
-        <button onClick={() => ask({ action: "ai", mode: "summarise", instruction: "" })} disabled={!canAsk || busy}>
+        <button onClick={() => ask({ action: "ai", mode: "summarise", instruction: "", ...aiChoice })} disabled={!canAsk || busy}>
           Ask AI: summarise
         </button>
         {busy && <span className="muted">AI is working…</span>}
