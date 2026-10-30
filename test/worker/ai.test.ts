@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DocState, Proposal } from "../../src/shared/api-types";
-import { LlmError, anthropic, gemini, applyEdits, interpret, runAi } from "../../src/worker/llm";
+import { LlmError, anthropic, gemini, scrub, applyEdits, interpret, runAi } from "../../src/worker/llm";
 import { api, uniqueId } from "./helpers";
 
 const TEXT = "Intro line.\nThe teh cat sat.\nEnd.\n";
@@ -46,6 +46,19 @@ describe("llm output validation", () => {
     expect(await gemini("g", "gemini-x", fake)("sys", "usr")).toBe('{"summary":"- ok"}');
     expect(seen!.url).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-x:generateContent");
     expect(seen).toMatchObject({ key: "g", body: { systemInstruction: { parts: [{ text: "sys" }] } } });
+  });
+  it("explains provider failures usefully without leaking the key", async () => {
+    const failing = (status: number, message: string) =>
+      (async () => new Response(JSON.stringify({ error: { status: "NOT_FOUND", message } }), { status })) as unknown as typeof fetch;
+    const err = await gemini("AIzaSECRETSECRETSECRET", "old-model", failing(404, "models/old-model is gone, key AIzaSECRETSECRETSECRET"))("s", "u").catch((e) => e);
+    expect(err).toBeInstanceOf(LlmError);
+    expect(err.message).toMatch(/Gemini \(old-model\) request failed \(404\).*LLM_MODEL.*is gone/);
+    expect(err.message).not.toContain("SECRET");
+    const down = (async () => { throw new Error("boom AIzaSECRETSECRETSECRET"); }) as unknown as typeof fetch;
+    const unreachable = await anthropic("sk-ant-secretsecretsecret", "m", down)("s", "u").catch((e) => e);
+    expect(unreachable.code).toBe("model_unreachable");
+    expect(unreachable.message).not.toContain("secret");
+    expect(scrub("x sk-ant-abcdefghijklmnop y")).toBe("x [redacted] y");
   });
   it("calls the Anthropic API with the key server-side", async () => {
     let seen: { url: string; key: string | null; body: any } | undefined;

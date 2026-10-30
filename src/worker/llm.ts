@@ -134,7 +134,7 @@ function pickProvider(env: LlmEnv): Complete {
   const provider = env.LLM_PROVIDER ?? (env.ANTHROPIC_API_KEY ? "anthropic" : env.GEMINI_API_KEY ? "gemini" : "anthropic");
   if (provider === "gemini") {
     if (!env.GEMINI_API_KEY) throw new LlmError("ai_not_configured", "No GEMINI_API_KEY is configured on the server.", 503);
-    return gemini(env.GEMINI_API_KEY, env.LLM_MODEL ?? "gemini-2.5-flash");
+    return gemini(env.GEMINI_API_KEY, env.LLM_MODEL ?? "gemini-flash-lite-latest");
   }
   if (provider !== "anthropic") throw new LlmError("ai_not_configured", `Unknown LLM_PROVIDER “${provider}”; use anthropic or gemini.`, 503);
   if (!env.ANTHROPIC_API_KEY) throw new LlmError("ai_not_configured", "No ANTHROPIC_API_KEY or GEMINI_API_KEY is configured on the server.", 503);
@@ -143,32 +143,72 @@ function pickProvider(env: LlmEnv): Complete {
 
 export function gemini(apiKey: string, model: string, fetchImpl: typeof fetch = fetch): Complete {
   return async (system, user) => {
-    const response = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
-      body: JSON.stringify({
+    const data = (await post(
+      `Gemini (${model})`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+      { "x-goog-api-key": apiKey },
+      {
         systemInstruction: { parts: [{ text: system }] },
         contents: [{ role: "user", parts: [{ text: user }] }],
-        generationConfig: { responseMimeType: "application/json", maxOutputTokens: 4096 },
-      }),
-    });
-    if (!response.ok) throw new LlmError("model_error", `The model request failed (${response.status}).`);
-    const data = (await response.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
-    const reply = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("");
+        // Room for the model's own "thinking" tokens as well as the JSON answer.
+        generationConfig: { responseMimeType: "application/json", maxOutputTokens: 8192 },
+      },
+      apiKey,
+      fetchImpl,
+    )) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string; thought?: boolean }> } }> };
+    const reply = data.candidates?.[0]?.content?.parts?.filter((p) => !p.thought).map((p) => p.text ?? "").join("");
     if (!reply) throw new LlmError("bad_model_output", "The model returned no text.");
     return reply;
   };
 }
 
+const REQUEST_TIMEOUT_MS = 60_000;
+
+/** Removes anything that looks like a credential from text taken from a provider's error. */
+export function scrub(text: string, secret?: string): string {
+  let out = text;
+  if (secret) out = out.split(secret).join("[redacted]");
+  return out.replace(/(AIza[\w-]{10,}|sk-[\w-]{10,})/g, "[redacted]").replace(/\s+/g, " ").trim().slice(0, 240);
+}
+
+/** One POST to a provider; failures become LlmErrors that say who failed, how, and the provider's own reason. */
+async function post(provider: string, url: string, headers: Record<string, string>, body: unknown, secret: string, fetchImpl: typeof fetch): Promise<any> {
+  let response: Response;
+  try {
+    response = await fetchImpl(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+  } catch (error) {
+    const timedOut = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
+    throw new LlmError("model_unreachable", timedOut ? `${provider} did not answer within ${REQUEST_TIMEOUT_MS / 1000}s.` : `Could not reach ${provider}.`);
+  }
+  if (!response.ok) {
+    let reason = "";
+    try {
+      const data = (await response.json()) as { error?: { message?: string; status?: string } };
+      reason = scrub(`${data.error?.status ?? ""} ${data.error?.message ?? ""}`, secret);
+    } catch {
+      /* no JSON body */
+    }
+    const hint = response.status === 404 ? " (the model may be retired or misspelled: set LLM_MODEL)" : response.status === 429 ? " (rate limit or quota reached)" : response.status === 401 || response.status === 403 ? " (check the API key)" : "";
+    throw new LlmError("model_error", `${provider} request failed (${response.status})${hint}${reason ? `: ${reason}` : ""}`);
+  }
+  return response.json();
+}
+
 export function anthropic(apiKey: string, model: string, fetchImpl: typeof fetch = fetch): Complete {
   return async (system, user) => {
-    const response = await fetchImpl("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-      body: JSON.stringify({ model, max_tokens: 4096, system, messages: [{ role: "user", content: user }] }),
-    });
-    if (!response.ok) throw new LlmError("model_error", `The model request failed (${response.status}).`);
-    const data = (await response.json()) as { content?: Array<{ type: string; text?: string }> };
+    const data = (await post(
+      `Anthropic (${model})`,
+      "https://api.anthropic.com/v1/messages",
+      { "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+      { model, max_tokens: 4096, system, messages: [{ role: "user", content: user }] },
+      apiKey,
+      fetchImpl,
+    )) as { content?: Array<{ type: string; text?: string }> };
     const reply = data.content?.find((block) => block.type === "text")?.text;
     if (!reply) throw new LlmError("bad_model_output", "The model returned no text.");
     return reply;
