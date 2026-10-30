@@ -1,13 +1,15 @@
 import type { EditorView } from "@codemirror/view";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { yUndoManagerKeymap } from "y-codemirror.next";
+import { setHighlights, type HighlightListeners, type HighlightPosition } from "../../src/client/comment-highlights";
 import { createDocSession, latestOnly } from "../../src/client/doc-session";
 import { createMarkdownEditor } from "../../src/client/MarkdownEditor";
+import { rangeToPositions } from "../../src/shared/relative-positions";
 
 const views: EditorView[] = [];
 
-function mount(text: Parameters<typeof createMarkdownEditor>[1]): EditorView {
-  const view = createMarkdownEditor(document.body.appendChild(document.createElement("div")), text);
+function mount(text: Parameters<typeof createMarkdownEditor>[1], listeners?: HighlightListeners): EditorView {
+  const view = createMarkdownEditor(document.body.appendChild(document.createElement("div")), text, null, false, undefined, listeners);
   views.push(view);
   return view;
 }
@@ -80,6 +82,56 @@ describe("Markdown editor bound to Y.Text", () => {
     expect(undo.run!(view)).toBe(true);
     expect(session.text.toString()).toBe("Hello");
     expect(view.state.doc.toString()).toBe("Hello");
+  });
+});
+
+describe("comment highlights", () => {
+  /** Highlights `word` (its first occurrence) as thread `id`. */
+  const highlight = (text: ReturnType<typeof createDocSession>["text"], id: number, word: string, active = false) => {
+    const from = text.toString().indexOf(word);
+    return { id, anchor: rangeToPositions(text, from, from + word.length), active };
+  };
+  const marks = (view: EditorView) =>
+    [...view.dom.querySelectorAll<HTMLElement>(".cm-comment")].map((m) => [m.dataset.threadId, m.textContent, m.classList.contains("cm-comment-active")]);
+
+  it("marks each thread's text with its id, and the active one", () => {
+    const session = createDocSession("The quick brown fox.");
+    const view = mount(session.text);
+    view.dispatch({ effects: setHighlights.of([highlight(session.text, 1, "quick"), highlight(session.text, 2, "fox", true)]) });
+    expect(marks(view)).toEqual([["1", "quick", false], ["2", "fox", true]]);
+  });
+
+  it("keeps a highlight on its text through this user's own edits, and drops it when its text is deleted", () => {
+    const session = createDocSession("Keep this. Remove that.");
+    const view = mount(session.text);
+    view.dispatch({ effects: setHighlights.of([highlight(session.text, 1, "Remove")]) });
+    type(view, 0, ">> ");
+    expect(marks(view)).toEqual([["1", "Remove", false]]);
+    view.dispatch({ changes: { from: 14, to: 21 }, userEvent: "delete" }); // "Remove "
+    expect(session.text.toString()).toBe(">> Keep this. that.");
+    expect(marks(view)).toEqual([]);
+  });
+
+  it("tells which thread's highlight was clicked", () => {
+    const session = createDocSession("The quick brown fox.");
+    const clicked: number[] = [];
+    const view = mount(session.text, { onClick: (id) => clicked.push(id) });
+    view.dispatch({ effects: setHighlights.of([highlight(session.text, 7, "brown")]) });
+    view.dom.querySelector(".cm-comment")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    view.contentDOM.querySelector(".cm-line")!.dispatchEvent(new MouseEvent("click", { bubbles: true })); // not on a highlight
+    expect(clicked).toEqual([7]);
+  });
+
+  it("reports highlight positions in text order, without threads whose text was deleted", async () => {
+    const session = createDocSession("Alpha\nBravo\nCharlie");
+    const layouts: HighlightPosition[][] = [];
+    const view = mount(session.text, { onLayout: (positions) => layouts.push(positions) });
+    view.dispatch({ effects: setHighlights.of([highlight(session.text, 2, "Charlie"), highlight(session.text, 1, "Alpha")]) });
+    await vi.waitFor(() => expect(layouts.at(-1)?.map((p) => p.id)).toEqual([1, 2]));
+
+    session.text.delete(0, "Alpha".length); // thread 1's text is gone
+    await vi.waitFor(() => expect(layouts.at(-1)?.map((p) => p.id)).toEqual([2]));
+    expect(marks(view)).toEqual([["2", "Charlie", false]]);
   });
 });
 

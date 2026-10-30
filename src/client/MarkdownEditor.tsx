@@ -6,7 +6,7 @@ import { useEffect, useRef } from "react";
 import { yCollab, yUndoManagerKeymap } from "y-codemirror.next";
 import type { Awareness } from "y-protocols/awareness";
 import type * as Y from "yjs";
-import { commentHighlights, setHighlights, type Highlight } from "./comment-highlights";
+import { commentHighlights, setHighlights, type Highlight, type HighlightListeners, type HighlightPosition } from "./comment-highlights";
 
 /** Holds the read-only setting so it can change without rebuilding the editor. */
 const readOnlySetting = new Compartment();
@@ -26,6 +26,7 @@ export function createMarkdownEditor(
   awareness: Awareness | null = null,
   readOnly = false,
   onSelection?: (from: number, to: number) => void,
+  highlightListeners: HighlightListeners = {},
 ): EditorView {
   return new EditorView({
     parent,
@@ -38,7 +39,7 @@ export function createMarkdownEditor(
       EditorView.lineWrapping,
       yCollab(text, awareness),
       readOnlySetting.of(readOnlyExtension(readOnly)),
-      commentHighlights(text),
+      commentHighlights(text, highlightListeners),
       EditorView.updateListener.of((update) => {
         if (update.selectionSet && onSelection) {
           const { from, to } = update.state.selection.main;
@@ -66,6 +67,8 @@ export function MarkdownEditor({
   readOnly = false,
   highlights = [],
   onSelection,
+  onHighlightClick,
+  onHighlightLayout,
   reveal,
 }: {
   text: Y.Text;
@@ -75,6 +78,10 @@ export function MarkdownEditor({
   highlights?: Highlight[];
   /** Told the selection whenever it changes (offsets in the text). */
   onSelection?: (from: number, to: number) => void;
+  /** Told which thread's highlight was clicked. */
+  onHighlightClick?: (id: number) => void;
+  /** Told where each highlight is (pixels below the top of the editor) whenever that changes. */
+  onHighlightLayout?: (positions: HighlightPosition[]) => void;
   /** Selects and scrolls to this range; a new object each time it should happen. */
   reveal?: { from: number; to: number } | null;
 }) {
@@ -82,10 +89,22 @@ export function MarkdownEditor({
   const view = useRef<EditorView | null>(null);
   const selectionListener = useRef(onSelection);
   selectionListener.current = onSelection;
+  const clickListener = useRef(onHighlightClick);
+  clickListener.current = onHighlightClick;
+  const layoutListener = useRef(onHighlightLayout);
+  layoutListener.current = onHighlightLayout;
 
   useEffect(() => {
-    view.current = createMarkdownEditor(host.current!, text, awareness, readOnly, (from, to) =>
-      selectionListener.current?.(from, to),
+    view.current = createMarkdownEditor(
+      host.current!,
+      text,
+      awareness,
+      readOnly,
+      (from, to) => selectionListener.current?.(from, to),
+      {
+        onClick: (id) => clickListener.current?.(id),
+        onLayout: (positions) => layoutListener.current?.(positions),
+      },
     );
     view.current.dispatch({ effects: setHighlights.of(highlights) });
     return () => {

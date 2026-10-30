@@ -7,6 +7,8 @@ import type {
   DocCatalogue,
   DocComment,
   Proposal,
+  SheetList,
+  SheetState,
   ProposalList,
   ProposalRequest,
   ReplyRequest,
@@ -15,6 +17,7 @@ import type {
   DocVersionList,
   Folder,
   HealthResponse,
+  ProvidersResponse,
   SearchResults,
   TrashList,
   UpdateDocMetaRequest,
@@ -23,8 +26,12 @@ import type {
   UpdateWorkspaceRequest,
   WorkspaceState,
 } from "../shared/api-types";
+import type { ChartConfig } from "../shared/sheet";
 import { TEST_USER_HEADER } from "../shared/users";
 import { currentUser } from "./current-user";
+
+/** The provider and model picked in the AI controls (sent with each AI request). */
+export type AiChoice = { provider?: "gemini" | "openrouter"; model?: string };
 
 /** Result of an API call: either data or the server's structured error. */
 export type ApiResult<T> = { ok: true; status: number; data: T } | { ok: false; status: number; error: ApiError["error"] };
@@ -48,7 +55,23 @@ const enc = encodeURIComponent;
 const ws = (workspaceId: string) => `/api/workspaces/${enc(workspaceId)}`;
 const doc = (workspaceId: string, docId: string) => `${ws(workspaceId)}/docs/${enc(docId)}`;
 
+const sheet = (workspaceId: string, sheetId: string) => `${ws(workspaceId)}/sheets/${enc(sheetId)}`;
+
 export const api = {
+  listSheets: (workspaceId: string) => call<SheetList>("GET", `${ws(workspaceId)}/sheets`),
+  getSheet: (workspaceId: string, sheetId: string) => call<SheetState>("GET", sheet(workspaceId, sheetId)),
+  putSheet: (workspaceId: string, sheetId: string, body: { title: string; cells?: Record<string, string> }) =>
+    call<SheetState>("PUT", sheet(workspaceId, sheetId), body),
+  addChart: (workspaceId: string, sheetId: string, chart: Omit<ChartConfig, "id">) =>
+    call<ChartConfig>("POST", `${sheet(workspaceId, sheetId)}/charts`, chart),
+  deleteChart: (workspaceId: string, sheetId: string, chartId: string) =>
+    call<SheetState>("DELETE", `${sheet(workspaceId, sheetId)}/charts/${chartId}`),
+  suggestChart: (workspaceId: string, sheetId: string, instruction: string, chartId?: string, choice: AiChoice = {}) =>
+    call<Omit<ChartConfig, "id">>("POST", `${sheet(workspaceId, sheetId)}/charts/suggest`, { instruction, ...(chartId ? { chartId } : {}), ...choice }),
+  aiProviders: () => call<ProvidersResponse>("GET", "/api/ai/providers"),
+  updateChart: (workspaceId: string, sheetId: string, chartId: string, chart: Omit<ChartConfig, "id">) =>
+    call<ChartConfig>("PUT", `${sheet(workspaceId, sheetId)}/charts/${chartId}`, chart),
+
   health: () => call<HealthResponse>("GET", "/api/health"),
 
   getWorkspace: (workspaceId: string) => call<WorkspaceState>("GET", ws(workspaceId)),

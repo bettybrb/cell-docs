@@ -19,7 +19,8 @@ const ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 export type CellAddress =
   | { kind: "workspace"; workspaceId: string }
-  | { kind: "doc"; workspaceId: string; docId: string };
+  | { kind: "doc"; workspaceId: string; docId: string }
+  | { kind: "sheet"; workspaceId: string; sheetId: string };
 
 export function isValidId(value: string): boolean {
   return ID_PATTERN.test(value);
@@ -36,6 +37,12 @@ export function docCellName(workspaceId: string, docId: string): string {
   return `doc:${workspaceId}/${docId}`;
 }
 
+export function sheetCellName(workspaceId: string, sheetId: string): string {
+  assertValidId(workspaceId, "workspaceId");
+  assertValidId(sheetId, "sheetId");
+  return `sheet:${workspaceId}/${sheetId}`;
+}
+
 /** Inverse of the functions above. Returns null for anything malformed. */
 export function parseCellName(name: string | null): CellAddress | null {
   if (!name) return null;
@@ -48,6 +55,11 @@ export function parseCellName(name: string | null): CellAddress | null {
   const doc = /^doc:([^/]+)\/([^/]+)$/.exec(name);
   if (doc && isValidId(doc[1]) && isValidId(doc[2])) {
     return { kind: "doc", workspaceId: doc[1], docId: doc[2] };
+  }
+
+  const sheet = /^sheet:([^/]+)\/([^/]+)$/.exec(name);
+  if (sheet && isValidId(sheet[1]) && isValidId(sheet[2])) {
+    return { kind: "sheet", workspaceId: sheet[1], sheetId: sheet[2] };
   }
 
   return null;

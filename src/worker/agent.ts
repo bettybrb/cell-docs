@@ -13,6 +13,8 @@ export function simulateAgent(text: string, request: ProposalRequest): { propose
       return { proposed: tidy(text), instruction: "Tidy up spacing and capital letters" };
     case "summary":
       return { proposed: withSummary(text), instruction: "Add a summary at the top" };
+    case "ai":
+      throw new Error("AI requests are handled by runAi, not the simulated agent.");
     case "replace":
       return {
         proposed: text.split(request.find).join(request.replace),

@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import type { ChartConfig } from "./sheet";
 import { ROLES, type DocPermissions, type EffectiveRole } from "./permissions";
 
 /**
@@ -6,7 +7,7 @@ import { ROLES, type DocPermissions, type EffectiveRole } from "./permissions";
  * Imported by both the React client and the Worker so they cannot drift apart.
  */
 
-export type CellKind = "workspace" | "doc";
+export type CellKind = "workspace" | "doc" | "sheet";
 
 /** Identifies the exact cell (Durable Object instance) that produced a response. */
 export interface CellInfo {
@@ -206,7 +207,7 @@ export interface Proposal {
   id: number;
   createdAt: string;
   requestedBy: string;
-  agent: "simulated";
+  agent: "simulated" | "ai";
   /** What was asked, in words. */
   instruction: string;
   /** Short description of what the agent changed. */
@@ -220,6 +221,30 @@ export interface Proposal {
 export interface ProposalList {
   cell: CellInfo;
   proposals: Proposal[]; // newest first
+}
+
+export interface SheetState {
+  cell: CellInfo;
+  workspaceId: string;
+  sheetId: string;
+  title: string;
+  owner: string | null;
+  yourRole: EffectiveRole;
+  revision: number;
+  /** Raw cell contents by reference ("A1"); formulas start with "=". */
+  cells: Record<string, string>;
+  charts: ChartConfig[];
+}
+
+export interface SheetEntry {
+  sheetId: string;
+  title: string;
+  owner: string | null;
+  updatedAt: string;
+}
+
+export interface SheetList {
+  sheets: SheetEntry[];
 }
 
 export interface DocVersionList {
@@ -267,10 +292,36 @@ export type ReplyRequest = typeof ReplyRequest.Type;
 export const ResolveRequest = Schema.Struct({ resolved: Schema.Boolean });
 export type ResolveRequest = typeof ResolveRequest.Type;
 
+/** One provider in the AI model selector (never contains a key). */
+export interface ProviderInfo {
+  id: "gemini" | "openrouter";
+  label: string;
+  configured: boolean;
+  models: string[];
+  /** Why the model list may be incomplete (e.g. OpenRouter unreachable). */
+  note?: string;
+}
+export interface ProvidersResponse {
+  providers: ProviderInfo[];
+  /** What a request uses when the page picks nothing. */
+  current: { provider: string; model: string | null };
+}
+
+/** Providers a page may pick; the keys stay in the Worker. */
+export const AiProvider = Schema.Literals(["gemini", "openrouter"]);
+
 /** What to ask the simulated agent for. */
 export const ProposalRequest = Schema.Union([
   Schema.Struct({ action: Schema.Literal("tidy") }),
   Schema.Struct({ action: Schema.Literal("summary") }),
+  /** A real model: natural-language editing, or summarising. */
+  Schema.Struct({
+    action: Schema.Literal("ai"),
+    mode: Schema.Literals(["edit", "summarise"]),
+    instruction: Schema.String.check(Schema.isMaxLength(1_000)),
+    provider: Schema.optionalKey(AiProvider),
+    model: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(120))),
+  }),
   Schema.Struct({
     action: Schema.Literal("replace"),
     find: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(200)),
@@ -278,6 +329,38 @@ export const ProposalRequest = Schema.Union([
   }),
 ]);
 export type ProposalRequest = typeof ProposalRequest.Type;
+
+export const MAX_SHEET_EDITS = 500;
+export const SheetEditsRequest = Schema.Struct({
+  edits: Schema.Array(Schema.Struct({ ref: Schema.String, raw: Schema.String })).check(Schema.isMaxLength(MAX_SHEET_EDITS)),
+});
+export type SheetEditsRequest = typeof SheetEditsRequest.Type;
+
+export const UpdateSheetRequest = Schema.Struct({
+  title: Schema.String.check(Schema.isMaxLength(120), nonBlank("title")),
+  /** Starting cells, honoured only when the sheet is created. */
+  cells: Schema.optionalKey(Schema.Record(Schema.String, Schema.String)),
+  charts: Schema.optionalKey(Schema.Array(Schema.Unknown)),
+});
+export type UpdateSheetRequest = typeof UpdateSheetRequest.Type;
+
+/** A chart config as sent by a client (validated by chartProblem); the server assigns the id. */
+export const AddChartRequest = Schema.Struct({
+  title: Schema.String,
+  type: Schema.String,
+  orientation: Schema.optionalKey(Schema.String),
+  labels: Schema.String,
+  series: Schema.Array(Schema.Struct({ name: Schema.String, range: Schema.String })),
+});
+export type AddChartRequest = typeof AddChartRequest.Type;
+
+export const AiChartRequest = Schema.Struct({
+  instruction: Schema.String.check(Schema.isMaxLength(500), nonBlank("instruction")),
+  /** Id of an existing chart to modify instead of designing a new one. */
+  chartId: Schema.optionalKey(Schema.String),
+  provider: Schema.optionalKey(AiProvider),
+  model: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(120))),
+});
 
 export const CreateFolderRequest = Schema.Struct({
   name: Schema.String.check(Schema.isMaxLength(MAX_FOLDER_NAME_LENGTH), nonBlank("name")),

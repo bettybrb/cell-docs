@@ -32,6 +32,7 @@ import { isSaveCheck } from "../../shared/save-check";
 import { DEFAULT_USER, isTestUser } from "../../shared/users";
 import { parseCellName, workspaceCellName } from "../addressing";
 import { computeChanges, simulateAgent } from "../agent";
+import { LlmError, runAi, type LlmEnv } from "../llm";
 import { catalogueCopy } from "../catalogue-copy";
 import { CELL_NAME_HEADER, errorResponse, json, readBody, requestUser } from "../http";
 import {
@@ -670,7 +671,24 @@ export class DocCell extends DurableObject<Env> {
     if (ask instanceof Response) return ask;
     const text = this.loadYDoc().getText("body");
     const base = text.toString();
-    const { proposed, instruction } = simulateAgent(base, ask);
+    let proposed: string;
+    let instruction: string;
+    if (ask.action === "ai") {
+      if (ask.mode === "edit" && ask.instruction.trim() === "") return errorResponse(422, "instruction_required", "Say what to change.");
+      try {
+        proposed = (await runAi(this.env as unknown as LlmEnv, ask.mode, ask.instruction, base, undefined, { provider: ask.provider, model: ask.model })).proposed;
+      } catch (error) {
+        if (error instanceof LlmError) return errorResponse(error.status, error.code, error.message);
+        throw error;
+      }
+      // Others may type while the model thinks; offsets were computed against `base`.
+      if (this.loadYDoc().getText("body").toString() !== base) {
+        return errorResponse(409, "doc_changed", "The document changed while the AI was working. Try again.");
+      }
+      instruction = ask.mode === "edit" ? `AI: ${ask.instruction.trim()}` : "AI: summarise the document";
+    } else {
+      ({ proposed, instruction } = simulateAgent(base, ask));
+    }
     const changes: StoredChange[] = computeChanges(base, proposed).map((change) => ({
       ...rangeToPositions(text, change.start, change.end),
       original: change.original,
@@ -780,7 +798,7 @@ export class DocCell extends DurableObject<Env> {
       id: row.id,
       createdAt: row.created_at,
       requestedBy: row.requested_by,
-      agent: "simulated",
+      agent: row.instruction.startsWith("AI: ") ? "ai" : "simulated",
       instruction: row.instruction,
       summary: row.summary,
       status: row.status,

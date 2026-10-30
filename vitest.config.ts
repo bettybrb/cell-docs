@@ -11,11 +11,11 @@ export default defineConfig({
   test: {
     projects: [
       {
-        plugins: [cloudflareTest({ wrangler: { configPath: "./wrangler.jsonc" } })],
+        plugins: [cloudflareTest({ wrangler: { configPath: "./wrangler.jsonc" }, miniflare: { bindings: { LLM_MOCK: "1" } } })],
         test: { name: "worker", include: ["test/worker/**/*.test.ts"], setupFiles: ["test/worker/setup.ts"] },
       },
       {
-        test: { name: "client", include: ["test/client/**/*.test.ts"], environment: "happy-dom" },
+        test: { name: "client", include: ["test/client/**/*.test.ts", "test/shared/**/*.test.ts"], environment: "happy-dom" },
       },
     ],
   },

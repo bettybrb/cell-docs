@@ -81,8 +81,9 @@ test("a comment on selected text stays on that text while someone else edits aro
   await openDoc(bob, ids, "bob");
 
   await select(alice, 10, 5); // "brown"
+  await alice.getByRole("button", { name: "Add comment" }).click();
   await alice.getByLabel("New comment").fill("Which shade?");
-  await alice.getByRole("button", { name: "Comment on selection" }).click();
+  await alice.getByRole("button", { name: "Submit" }).click();
   await expect(alice.getByTestId("thread-quote")).toContainText("On “brown”");
   await expect(alice.locator(".cm-comment")).toHaveText("brown");
   await expect(bob.locator(".cm-comment")).toHaveText("brown"); // shown live to bob too
@@ -113,6 +114,131 @@ test("replies and resolving reach the other browser without reloading", async ({
   await expect(alice.getByTestId("thread")).toHaveCount(0); // resolved threads are hidden by default
   await alice.getByLabel("Show resolved").check();
   await expect(alice.getByTestId("thread")).toContainText("Resolved by bob");
+});
+
+/** Selects `length` characters starting at `from` on line `line` (0-based), with the keyboard. */
+async function selectOnLine(page: Page, line: number, from: number, length: number): Promise<void> {
+  await editor(page).click();
+  await page.keyboard.press("ControlOrMeta+Home");
+  for (let i = 0; i < line; i++) await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("Home");
+  for (let i = 0; i < from; i++) await page.keyboard.press("ArrowRight");
+  for (let i = 0; i < length; i++) await page.keyboard.press("Shift+ArrowRight");
+}
+
+async function commentOnSelection(page: Page, body: string): Promise<void> {
+  await page.getByRole("button", { name: "Add comment" }).click();
+  await page.getByLabel("New comment").fill(body);
+  await page.getByRole("button", { name: "Submit" }).click();
+  await expect(page.getByTestId("draft")).toHaveCount(0);
+}
+
+const top = async (locator: ReturnType<Page["locator"]>) => (await locator.boundingBox())!.y;
+
+test("cards sit beside their text without overlapping, and a highlight and its card pick each other", async ({ browser }) => {
+  const lines = Array.from({ length: 14 }, (_, i) => `Line ${i} words here.`);
+  const ids = await aliceDoc(lines.join("\n"));
+  const alice = await newBrowser(browser);
+  await openDoc(alice, ids, "alice");
+
+  await selectOnLine(alice, 0, 0, 4);
+  await commentOnSelection(alice, "First");
+  await selectOnLine(alice, 1, 0, 4);
+  await commentOnSelection(alice, "Second, on the very next line");
+  await selectOnLine(alice, 12, 8, 5);
+  await commentOnSelection(alice, "Far below");
+
+  const cards = alice.getByTestId("thread");
+  await expect(cards).toHaveCount(3);
+  // In text order, none overlapping.
+  await expect(cards.nth(0)).toContainText("First");
+  await expect(cards.nth(2)).toContainText("Far below");
+  await expect
+    .poll(async () => {
+      const boxes = await Promise.all([0, 1, 2].map(async (i) => (await cards.nth(i).boundingBox())!));
+      return boxes.every((box, i) => i === 0 || boxes[i - 1]!.y + boxes[i - 1]!.height <= box.y);
+    })
+    .toBe(true);
+  // A card with room is level with its text.
+  const far = alice.locator(".cm-comment", { hasText: "words" });
+  await expect.poll(async () => Math.abs((await top(cards.nth(2))) - (await top(far)))).toBeLessThan(6);
+
+  // Clicking a highlight picks its card.
+  await alice.locator(".cm-comment").first().click();
+  await expect(cards.nth(0)).toHaveClass(/active-thread/);
+  // Clicking a card picks it and selects its text.
+  await cards.nth(2).getByText("Far below").click();
+  await expect(cards.nth(2)).toHaveClass(/active-thread/);
+  await expect(alice.locator(".cm-comment-active")).toHaveText("words");
+  expect(await alice.evaluate(() => getSelection()?.toString())).toBe("words");
+
+  // The margin can be hidden; the highlights stay.
+  await alice.getByRole("button", { name: "Hide comments" }).click();
+  await expect(alice.getByTestId("comment-margin")).toHaveCount(0);
+  await expect(alice.locator(".cm-comment")).toHaveCount(3);
+  await alice.getByRole("button", { name: "Show comments" }).click();
+  await expect(cards).toHaveCount(3);
+});
+
+test("a draft comment can be cancelled", async ({ browser }) => {
+  const ids = await aliceDoc("Draft me.");
+  const alice = await newBrowser(browser);
+  await openDoc(alice, ids, "alice");
+  await select(alice, 0, 5);
+  await alice.getByRole("button", { name: "Add comment" }).click();
+  await expect(alice.getByTestId("draft")).toContainText("On “Draft”");
+  await expect(alice.locator(".cm-comment")).toHaveText("Draft"); // the draft's text is highlighted
+  await alice.getByLabel("New comment").fill("Never mind");
+  await alice.getByRole("button", { name: "Cancel" }).click();
+  await expect(alice.getByTestId("draft")).toHaveCount(0);
+  await expect(alice.locator(".cm-comment")).toHaveCount(0);
+  await expect(alice.getByTestId("thread")).toHaveCount(0);
+});
+
+test("a resolved thread can be reopened from history with its messages, live for others", async ({ browser }) => {
+  const ids = await aliceDoc("Ship it on Friday.");
+  const [alice, bob] = [await newBrowser(browser), await newBrowser(browser)];
+  await openDoc(alice, ids, "alice");
+  await openDoc(bob, ids, "bob");
+  await select(alice, 11, 6); // "Friday"
+  await commentOnSelection(alice, "Too soon?");
+  await bob.getByLabel("Reply to alice").fill("It is fine.");
+  await bob.getByRole("button", { name: "Reply" }).click();
+  await expect(alice.getByTestId("reply")).toContainText("bob");
+
+  await alice.getByRole("button", { name: "Resolve" }).click();
+  for (const page of [alice, bob]) {
+    await expect(page.getByTestId("thread")).toHaveCount(0);
+    await expect(page.locator(".cm-comment")).toHaveCount(0);
+  }
+
+  await bob.getByLabel("Show resolved").check();
+  await bob.getByRole("button", { name: "Reopen" }).click();
+  for (const page of [alice, bob]) {
+    await expect(page.locator(".cm-comment")).toHaveText("Friday");
+    await expect(page.getByTestId("comment")).toContainText("Too soon?");
+    await expect(page.getByTestId("reply")).toContainText("It is fine.");
+  }
+});
+
+test("a thread whose text was deleted stays, marked as missing its text", async ({ browser }) => {
+  const ids = await aliceDoc("Keep this. Remove that.");
+  const [alice, bob] = [await newBrowser(browser), await newBrowser(browser)];
+  await openDoc(alice, ids, "alice");
+  await openDoc(bob, ids, "bob");
+  await select(alice, 11, 6); // "Remove"
+  await commentOnSelection(alice, "Why remove?");
+  await expect(bob.locator(".cm-comment")).toHaveText("Remove");
+
+  await select(bob, 11, 7);
+  await bob.keyboard.press("Backspace");
+  await expectText(alice, "Keep this. that.");
+  for (const page of [alice, bob]) {
+    await expect(page.locator(".cm-comment")).toHaveCount(0);
+    await expect(page.getByTestId("anchor-deleted")).toBeVisible();
+    await expect(page.getByTestId("thread-quote")).toContainText("“Remove”");
+    await expect(page.getByTestId("comment")).toContainText("Why remove?");
+  }
 });
 
 test("an agent proposal is previewed, then applied without overwriting another user's edit", async ({ browser }) => {

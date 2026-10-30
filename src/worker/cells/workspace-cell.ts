@@ -95,6 +95,10 @@ export class WorkspaceCell extends DurableObject<Env> {
     addColumnIfMissing(this.sql, "documents", "purge_at", "TEXT");
     // Owned by the catalogue.
     addColumnIfMissing(this.sql, "documents", "folder_id", "TEXT");
+    this.sql.exec(`CREATE TABLE IF NOT EXISTS sheets (
+      sheet_id TEXT PRIMARY KEY, title TEXT NOT NULL, owner TEXT, default_role TEXT NOT NULL,
+      acl TEXT NOT NULL, updated_at TEXT NOT NULL
+    )`);
     this.sql.exec(`CREATE TABLE IF NOT EXISTS folders (
       id         TEXT PRIMARY KEY,
       name       TEXT NOT NULL,
@@ -139,6 +143,8 @@ export class WorkspaceCell extends DurableObject<Env> {
     if (section === "docs" && isValidId(id) && detail === "meta" && rest.length === 0) {
       return method === "PUT" ? this.updateMeta(request, id, user) : notAllowed();
     }
+    if (section === "sheets" && id === undefined) return method === "GET" ? this.listSheets(user) : notAllowed();
+    if (section === "sheets" && isValidId(id) && detail === undefined) return method === "PUT" ? this.storeSheet(request, id) : notAllowed();
     if (section === "trash" && id === undefined) return method === "GET" ? this.listTrash(name, user) : notAllowed();
     if (section === "search" && id === undefined) return method === "GET" ? this.search(name, url.searchParams, user) : notAllowed();
     if (section === "folders" && id === undefined) return method === "POST" ? this.createFolder(request, name) : notAllowed();
@@ -170,6 +176,25 @@ export class WorkspaceCell extends DurableObject<Env> {
    * Recycle Bin state). Folder and tags are the catalogue's own and stay.
    * Safe to repeat, so retries and re-registrations are harmless.
    */
+  /** Sheets this user may read, newest first. */
+  private listSheets(user: string): Response {
+    const rows = this.sql.exec<{ sheet_id: string; title: string; owner: string | null; default_role: Role; acl: string; updated_at: string }>(`SELECT * FROM sheets ORDER BY updated_at DESC`).toArray();
+    const sheets = rows
+      .filter((r) => allows(roleOf(user, { owner: r.owner, defaultRole: r.default_role, users: JSON.parse(r.acl) as Record<string, Role> }), "read"))
+      .map((r) => ({ sheetId: r.sheet_id, title: r.title, owner: r.owner, updatedAt: r.updated_at }));
+    return json({ sheets });
+  }
+
+  private async storeSheet(request: Request, sheetId: string): Promise<Response> {
+    const b = (await request.json()) as { title: string; owner: string | null; defaultRole: Role; acl: Record<string, Role>; updatedAt: string };
+    this.sql.exec(
+      `INSERT INTO sheets (sheet_id, title, owner, default_role, acl, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT (sheet_id) DO UPDATE SET title = excluded.title, owner = excluded.owner, default_role = excluded.default_role, acl = excluded.acl, updated_at = excluded.updated_at`,
+      sheetId, b.title, b.owner, b.defaultRole, JSON.stringify(b.acl), b.updatedAt,
+    );
+    return json({ ok: true });
+  }
+
   private async storeCopy(request: Request, name: string, docId: string): Promise<Response> {
     const copy = await readBody(request, CatalogueCopy);
     if (copy instanceof Response) return copy;
