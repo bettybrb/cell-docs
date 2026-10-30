@@ -3,6 +3,9 @@ import { Schema } from "effect";
 /** Secrets and settings for the model; the key lives only in the Worker's env (.dev.vars / wrangler secret). */
 export interface LlmEnv {
   ANTHROPIC_API_KEY?: string;
+  GEMINI_API_KEY?: string;
+  /** "anthropic" or "gemini"; by default whichever key is set (Anthropic first). */
+  LLM_PROVIDER?: string;
   /** "1" uses a deterministic stand-in model, for tests and offline demos. */
   LLM_MOCK?: string;
   LLM_MODEL?: string;
@@ -128,8 +131,33 @@ export async function runAi(env: LlmEnv, mode: AiMode, instruction: string, text
 
 function pickProvider(env: LlmEnv): Complete {
   if (env.LLM_MOCK === "1") return mockModel;
-  if (!env.ANTHROPIC_API_KEY) throw new LlmError("ai_not_configured", "No ANTHROPIC_API_KEY is configured on the server.", 503);
+  const provider = env.LLM_PROVIDER ?? (env.ANTHROPIC_API_KEY ? "anthropic" : env.GEMINI_API_KEY ? "gemini" : "anthropic");
+  if (provider === "gemini") {
+    if (!env.GEMINI_API_KEY) throw new LlmError("ai_not_configured", "No GEMINI_API_KEY is configured on the server.", 503);
+    return gemini(env.GEMINI_API_KEY, env.LLM_MODEL ?? "gemini-2.5-flash");
+  }
+  if (provider !== "anthropic") throw new LlmError("ai_not_configured", `Unknown LLM_PROVIDER “${provider}”; use anthropic or gemini.`, 503);
+  if (!env.ANTHROPIC_API_KEY) throw new LlmError("ai_not_configured", "No ANTHROPIC_API_KEY or GEMINI_API_KEY is configured on the server.", 503);
   return anthropic(env.ANTHROPIC_API_KEY, env.LLM_MODEL ?? "claude-sonnet-5-5");
+}
+
+export function gemini(apiKey: string, model: string, fetchImpl: typeof fetch = fetch): Complete {
+  return async (system, user) => {
+    const response = await fetchImpl(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-goog-api-key": apiKey },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: system }] },
+        contents: [{ role: "user", parts: [{ text: user }] }],
+        generationConfig: { responseMimeType: "application/json", maxOutputTokens: 4096 },
+      }),
+    });
+    if (!response.ok) throw new LlmError("model_error", `The model request failed (${response.status}).`);
+    const data = (await response.json()) as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> };
+    const reply = data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("");
+    if (!reply) throw new LlmError("bad_model_output", "The model returned no text.");
+    return reply;
+  };
 }
 
 export function anthropic(apiKey: string, model: string, fetchImpl: typeof fetch = fetch): Complete {

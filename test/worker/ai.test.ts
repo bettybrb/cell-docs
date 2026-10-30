@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { DocState, Proposal } from "../../src/shared/api-types";
-import { LlmError, anthropic, applyEdits, interpret, runAi } from "../../src/worker/llm";
+import { LlmError, anthropic, gemini, applyEdits, interpret, runAi } from "../../src/worker/llm";
 import { api, uniqueId } from "./helpers";
 
 const TEXT = "Intro line.\nThe teh cat sat.\nEnd.\n";
@@ -32,6 +32,20 @@ describe("llm output validation", () => {
   });
   it("reports a missing key without calling anything", async () => {
     await expect(runAi({}, "edit", "x", "t")).rejects.toMatchObject({ code: "ai_not_configured" });
+  });
+  it("selects Gemini by key or LLM_PROVIDER, and reports a missing Gemini key", async () => {
+    await expect(runAi({ LLM_PROVIDER: "gemini" }, "edit", "x", "t")).rejects.toMatchObject({ code: "ai_not_configured", message: /GEMINI_API_KEY/ });
+    await expect(runAi({ LLM_PROVIDER: "other" }, "edit", "x", "t")).rejects.toMatchObject({ code: "ai_not_configured" });
+  });
+  it("calls the Gemini API with the key in a header, never the URL", async () => {
+    let seen: { url: string; key: string | null; body: any } | undefined;
+    const fake = (async (url: string, init: RequestInit) => {
+      seen = { url, key: new Headers(init.headers).get("x-goog-api-key"), body: JSON.parse(init.body as string) };
+      return new Response(JSON.stringify({ candidates: [{ content: { parts: [{ text: '{"summary":"- ok"}' }] } }] }));
+    }) as unknown as typeof fetch;
+    expect(await gemini("g", "gemini-x", fake)("sys", "usr")).toBe('{"summary":"- ok"}');
+    expect(seen!.url).toBe("https://generativelanguage.googleapis.com/v1beta/models/gemini-x:generateContent");
+    expect(seen).toMatchObject({ key: "g", body: { systemInstruction: { parts: [{ text: "sys" }] } } });
   });
   it("calls the Anthropic API with the key server-side", async () => {
     let seen: { url: string; key: string | null; body: any } | undefined;

@@ -9,6 +9,8 @@ npm install
 # AI: pick one. Without either, AI buttons answer 503 "not configured".
 echo 'LLM_MOCK=1' > .dev.vars                 # deterministic offline stand-in model (free)
 # echo 'ANTHROPIC_API_KEY=sk-ant-...' > .dev.vars   # real model (billed); optional LLM_MODEL=claude-sonnet-5-5
+# echo 'GEMINI_API_KEY=...' > .dev.vars              # or Gemini; optional LLM_MODEL=gemini-2.5-flash
+# If both keys are set, Anthropic wins unless LLM_PROVIDER=gemini.
 npm run dev                                   # note the URL (default port 5173)
 BASE_URL=http://localhost:5173 npm run demo:seed
 ```
