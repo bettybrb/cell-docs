@@ -77,7 +77,7 @@ export class SheetCell extends DurableObject<Env> {
     if (path === "/charts/suggest") return method === "POST" ? this.suggest(request, caller) : notAllowed();
     if (path === "/charts") return method === "POST" ? this.addChart(request, caller) : notAllowed();
     const chart = /^\/charts\/([a-z0-9-]+)$/.exec(path);
-    if (chart) return method === "DELETE" ? this.deleteChart(chart[1]!, caller) : notAllowed();
+    if (chart) return method === "DELETE" ? this.deleteChart(chart[1]!, caller) : method === "PUT" ? this.updateChart(chart[1]!, request, caller) : notAllowed();
     return errorResponse(404, "not_found", "Unknown sheet cell path.");
   }
 
@@ -234,7 +234,7 @@ export class SheetCell extends DurableObject<Env> {
     const problem = chartProblem(body as Partial<ChartConfig>);
     if (problem) return errorResponse(422, "bad_chart", problem);
     if (this.charts().length >= MAX_CHARTS) return errorResponse(422, "too_many_charts", `At most ${MAX_CHARTS} charts per sheet.`);
-    const chart: ChartConfig = { id: crypto.randomUUID(), title: body.title, type: body.type as ChartConfig["type"], labels: body.labels, series: [...body.series] };
+    const chart: ChartConfig = { id: crypto.randomUUID(), title: body.title, type: body.type as ChartConfig["type"], ...orientationOf(body), labels: body.labels, series: [...body.series] };
     this.insertChart(chart);
     this.sql.exec(`UPDATE sheet SET revision = revision + 1 WHERE id = 1`);
     this.broadcast({ type: "charts", charts: this.charts() });
@@ -252,7 +252,9 @@ export class SheetCell extends DurableObject<Env> {
     const body = await readBody(request, AiChartRequest);
     if (body instanceof Response) return body;
     try {
-      const chart = await suggestChart(this.env as unknown as LlmEnv, body.instruction, this.cells());
+      const existing = body.chartId ? this.charts().find((c) => c.id === body.chartId) : undefined;
+      if (body.chartId && !existing) return errorResponse(404, "chart_not_found", "That chart no longer exists.");
+      const chart = await suggestChart(this.env as unknown as LlmEnv, body.instruction, this.cells(), undefined, existing);
       const problem = chartProblem(chart);
       if (problem) return errorResponse(502, "bad_model_output", `The model's chart was unusable: ${problem}`);
       return json(chart);
@@ -260,6 +262,22 @@ export class SheetCell extends DurableObject<Env> {
       if (error instanceof LlmError) return errorResponse(error.status, error.code, error.message);
       throw error;
     }
+  }
+
+  /** Replaces a chart's configuration in place (same id and position). */
+  private async updateChart(id: string, request: Request, caller: Caller): Promise<Response> {
+    const row = this.access(caller, "edit");
+    if (row instanceof Response) return row;
+    const body = await readBody(request, AddChartRequest);
+    if (body instanceof Response) return body;
+    const problem = chartProblem(body as Partial<ChartConfig>);
+    if (problem) return errorResponse(422, "bad_chart", problem);
+    if (!this.charts().some((c) => c.id === id)) return errorResponse(404, "chart_not_found", "That chart no longer exists.");
+    const chart: ChartConfig = { id, title: body.title, type: body.type as ChartConfig["type"], ...orientationOf(body), labels: body.labels, series: [...body.series] };
+    this.sql.exec(`UPDATE sheet_charts SET config = ? WHERE id = ?`, JSON.stringify(chart), id);
+    this.sql.exec(`UPDATE sheet SET revision = revision + 1 WHERE id = 1`);
+    this.broadcast({ type: "charts", charts: this.charts() });
+    return json(chart);
   }
 
   private deleteChart(id: string, caller: Caller): Response {
@@ -342,4 +360,9 @@ export class SheetCell extends DurableObject<Env> {
     });
     if (!response.ok) throw new Error(`workspace cell answered ${response.status}`);
   }
+}
+
+/** Keeps `orientation` only when it was sent (validated by chartProblem). */
+function orientationOf(body: { orientation?: string }): { orientation?: ChartConfig["orientation"] } {
+  return body.orientation ? { orientation: body.orientation as ChartConfig["orientation"] } : {};
 }

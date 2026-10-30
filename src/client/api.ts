@@ -62,8 +62,10 @@ export const api = {
     call<ChartConfig>("POST", `${sheet(workspaceId, sheetId)}/charts`, chart),
   deleteChart: (workspaceId: string, sheetId: string, chartId: string) =>
     call<SheetState>("DELETE", `${sheet(workspaceId, sheetId)}/charts/${chartId}`),
-  suggestChart: (workspaceId: string, sheetId: string, instruction: string) =>
-    call<Omit<ChartConfig, "id">>("POST", `${sheet(workspaceId, sheetId)}/charts/suggest`, { instruction }),
+  suggestChart: (workspaceId: string, sheetId: string, instruction: string, chartId?: string) =>
+    call<Omit<ChartConfig, "id">>("POST", `${sheet(workspaceId, sheetId)}/charts/suggest`, { instruction, ...(chartId ? { chartId } : {}) }),
+  updateChart: (workspaceId: string, sheetId: string, chartId: string, chart: Omit<ChartConfig, "id">) =>
+    call<ChartConfig>("PUT", `${sheet(workspaceId, sheetId)}/charts/${chartId}`, chart),
 
   health: () => call<HealthResponse>("GET", "/api/health"),
 

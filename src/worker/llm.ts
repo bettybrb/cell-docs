@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import type { ChartConfig } from "../shared/sheet";
 
 /** Secrets and settings for the model; the key lives only in the Worker's env (.dev.vars / wrangler secret). */
 export interface LlmEnv {
@@ -76,6 +77,7 @@ const CHART_JSON_SCHEMA = {
   properties: {
     title: { type: "STRING" },
     type: { type: "STRING", enum: ["bar", "line"] },
+    orientation: { type: "STRING", enum: ["vertical", "horizontal"] },
     labels: { type: "STRING" },
     series: { type: "ARRAY", items: { type: "OBJECT", properties: { name: { type: "STRING" }, range: { type: "STRING" } }, required: ["name", "range"] } },
   },
@@ -114,18 +116,26 @@ export function applyEdits(text: string, edits: ReadonlyArray<{ find: string; re
 const ChartOutput = Schema.Struct({
   title: Schema.String,
   type: Schema.Literals(["bar", "line"]),
+  orientation: Schema.optionalKey(Schema.Literals(["vertical", "horizontal"])),
   labels: Schema.String,
   series: Schema.Array(Schema.Struct({ name: Schema.String, range: Schema.String })),
 });
 
-const CHART_SYSTEM = `You design one chart for a spreadsheet. The user gives cells as "REF: raw" lines. Reply with ONLY a JSON object: {"title": string, "type": "bar" | "line", "labels": "A2:A7", "series": [{"name": string, "range": "B2:B7"}]}. Ranges are single-column A1 ranges of equal length covering data rows (not headers). Never include anything outside the JSON.`;
+const CHART_SYSTEM = `You design one chart for a spreadsheet and MUST follow the user's request exactly: use the chart type, orientation, columns, rows and title the user asks for, and only add or drop series when they ask. If the request names columns or headers, use those columns. The user gives cells as "REF: raw" lines. Reply with ONLY a JSON object: {"title": string, "type": "bar" | "line", "orientation": "vertical" | "horizontal", "labels": "A2:A7", "series": [{"name": string, "range": "B2:B7"}]}. Use "horizontal" only for bar charts the user wants horizontal (otherwise "vertical"). Ranges are single-column A1 ranges of equal length covering data rows (not headers); a series name is its column header. If a current chart is given, return the full modified chart: keep everything the user did not ask to change. Never include anything outside the JSON.`;
 
-/** Asks the model for a chart over the sheet; the caller must still validate the ranges (chartProblem). */
-export async function suggestChart(env: LlmEnv, instruction: string, cells: Record<string, string>, complete?: Complete) {
+/** Asks the model for a chart over the sheet (or a modified `existing` chart); the caller must still validate the ranges (chartProblem). */
+export async function suggestChart(env: LlmEnv, instruction: string, cells: Record<string, string>, complete?: Complete, existing?: Omit<ChartConfig, "id">) {
   const lines = Object.entries(cells).slice(0, 400).map(([ref, raw]) => `${ref}: ${raw}`).join("\n");
   const call = complete ?? pickProvider(env);
-  const out = validate(ChartOutput, parseJsonObject(await call(CHART_SYSTEM, `Request: ${instruction}\n\n<cells>\n${lines}\n</cells>`, CHART_JSON_SCHEMA)), "title, type, labels, series");
-  return { title: out.title.slice(0, 80), type: out.type, labels: out.labels, series: [...out.series] };
+  const current = existing ? `\n\n<current_chart>\n${JSON.stringify({ title: existing.title, type: existing.type, orientation: existing.orientation ?? "vertical", labels: existing.labels, series: existing.series })}\n</current_chart>` : "";
+  const out = validate(ChartOutput, parseJsonObject(await call(CHART_SYSTEM, `Request: ${instruction}${current}\n\n<cells>\n${lines}\n</cells>`, CHART_JSON_SCHEMA)), "title, type, labels, series");
+  return {
+    title: out.title.slice(0, 80),
+    type: out.type,
+    ...(out.type === "bar" && out.orientation === "horizontal" ? { orientation: "horizontal" as const } : {}),
+    labels: out.labels,
+    series: [...out.series],
+  };
 }
 
 export interface AiResult {
@@ -249,16 +259,30 @@ export function anthropic(apiKey: string, model: string, fetchImpl: typeof fetch
  */
 const mockModel: Complete = async (system, user) => {
   if (system === CHART_SYSTEM) {
+    const request = /^Request: (.*)$/m.exec(user)?.[1] ?? "";
+    const current = /<current_chart>\n(.*)\n<\/current_chart>/.exec(user)?.[1];
+    const cur = current ? JSON.parse(current) : null;
     const refs = [...user.matchAll(/^([A-Z])(\d+): /gm)].map((m) => ({ col: m[1]!, row: Number(m[2]) }));
     const last = Math.max(...refs.map((r) => r.row), 2);
     const cols = [...new Set(refs.map((r) => r.col))].sort();
-    const header = (col: string) => /^[A-Z]1: (.*)$/m.exec(user.replace(new RegExp(`^(?!${col}1: ).*\\n?`, "gm"), ""))?.[1] ?? col;
-    return JSON.stringify({
-      title: /line/i.test(user) ? "Trend" : "Overview",
-      type: /line|trend/i.test(user) ? "line" : "bar",
+    const header = (col: string) => new RegExp(`^${col}1: (.*)$`, "m").exec(user)?.[1] ?? col;
+    // Columns whose header the request mentions; otherwise the first two value columns.
+    const named = cols.slice(1).filter((col) => request.toLowerCase().includes(header(col).toLowerCase()));
+    const valueCols = named.length ? named : cols.slice(1, 3);
+    const line = /line|trend/i.test(request);
+    const bar = /bar|column/i.test(request);
+    const horizontal = /horizontal/i.test(request);
+    const type = line ? "line" : bar || !cur ? "bar" : cur.type;
+    const fresh = {
+      title: line ? "Trend" : "Overview",
+      type,
+      orientation: horizontal ? "horizontal" : /vertical/i.test(request) ? "vertical" : (cur?.orientation ?? "vertical"),
       labels: `${cols[0]}2:${cols[0]}${last}`,
-      series: cols.slice(1, 3).map((col) => ({ name: header(col), range: `${col}2:${col}${last}` })),
-    });
+      series: valueCols.map((col) => ({ name: header(col), range: `${col}2:${col}${last}` })),
+    };
+    if (!cur) return JSON.stringify(fresh);
+    const retitle = /(?:title|call it|rename)[^"“']*["“']([^"”']+)["”']/i.exec(request)?.[1];
+    return JSON.stringify({ ...cur, type, orientation: fresh.orientation, title: retitle ?? cur.title, series: named.length ? fresh.series : cur.series });
   }
   const doc = /<document>\n([\s\S]*)\n<\/document>/.exec(user)?.[1] ?? "";
   if (system === SYSTEM.summarise) {

@@ -328,12 +328,17 @@ export type UpdateSheetRequest = typeof UpdateSheetRequest.Type;
 export const AddChartRequest = Schema.Struct({
   title: Schema.String,
   type: Schema.String,
+  orientation: Schema.optionalKey(Schema.String),
   labels: Schema.String,
   series: Schema.Array(Schema.Struct({ name: Schema.String, range: Schema.String })),
 });
 export type AddChartRequest = typeof AddChartRequest.Type;
 
-export const AiChartRequest = Schema.Struct({ instruction: Schema.String.check(Schema.isMaxLength(500), nonBlank("instruction")) });
+export const AiChartRequest = Schema.Struct({
+  instruction: Schema.String.check(Schema.isMaxLength(500), nonBlank("instruction")),
+  /** Id of an existing chart to modify instead of designing a new one. */
+  chartId: Schema.optionalKey(Schema.String),
+});
 
 export const CreateFolderRequest = Schema.Struct({
   name: Schema.String.check(Schema.isMaxLength(MAX_FOLDER_NAME_LENGTH), nonBlank("name")),

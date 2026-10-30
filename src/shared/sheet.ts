@@ -200,6 +200,8 @@ export interface ChartConfig {
   id: string;
   title: string;
   type: "bar" | "line";
+  /** Bars only: "horizontal" lays the bars out left to right. Default vertical. */
+  orientation?: "vertical" | "horizontal";
   /** Range of category labels, e.g. "A2:A7". */
   labels: string;
   /** One range of numbers per series, e.g. "B2:B7". */
@@ -226,6 +228,7 @@ export function chartData(config: ChartConfig, values: Record<string, Value>): C
 /** Returns an error message when a chart config is unusable, else null. */
 export function chartProblem(c: Partial<ChartConfig>): string | null {
   if (c.type !== "bar" && c.type !== "line") return "Chart type must be bar or line.";
+  if (c.orientation !== undefined && c.orientation !== "vertical" && c.orientation !== "horizontal") return "Chart orientation must be vertical or horizontal.";
   if (typeof c.title !== "string" || c.title.length > 80) return "Chart needs a title (up to 80 characters).";
   const rangeOf = (r: unknown) => (typeof r === "string" ? expandRange(r) : null);
   const labels = rangeOf(c.labels);

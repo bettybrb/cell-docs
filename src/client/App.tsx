@@ -17,18 +17,31 @@ import { RecycleBin } from "./RecycleBin";
 import { useTitleAutosave, type TitleSaveState } from "./useTitleAutosave";
 import { VersionHistory } from "./VersionHistory";
 
+type Tab = "documents" | "spreadsheets";
+
 export function App() {
+  // A link to a sheet (and not to a document) opens the Spreadsheets tab.
+  const [tab, setTab] = useState<Tab>(() => (urlParam("sheet") && !urlParam("doc") ? "spreadsheets" : "documents"));
+  // Both stay mounted (just hidden), so switching tabs keeps live connections and drafts.
   return (
     <main>
-      <h1>cell-docs-lab</h1>
-      <p className="lead">
-        A stateless Worker routes each request to a <strong>cell</strong>: one Durable Object
-        per workspace and one per document, each with its own private SQLite database.
-      </p>
-      <UserSwitcher />
-      <BackendStatus />
-      <CellExplorer />
-      <SheetPanel workspaceId={urlParam("workspace") ?? "sample-workspace"} />
+      <header className="app-header">
+        <h1>Cell Docs</h1>
+        <nav aria-label="Sections" className="tabs">
+          {(["documents", "spreadsheets"] as const).map((t) => (
+            <button key={t} aria-current={tab === t} data-testid={`tab-${t}`} onClick={() => setTab(t)}>
+              {t === "documents" ? "Documents" : "Spreadsheets"}
+            </button>
+          ))}
+        </nav>
+        <UserSwitcher />
+      </header>
+      <div hidden={tab !== "documents"}>
+        <CellExplorer />
+      </div>
+      <div hidden={tab !== "spreadsheets"}>
+        <SheetPanel workspaceId={urlParam("workspace") ?? "sample-workspace"} />
+      </div>
     </main>
   );
 }
@@ -45,9 +58,9 @@ function UserSwitcher() {
     location.assign(url);
   };
   return (
-    <p className="inline" data-testid="user-switcher">
+    <p className="inline user-switcher" data-testid="user-switcher">
       <label className="inline">
-        Acting as test user
+        Test user
         <select aria-label="Test user" value={currentUser()} onChange={(e) => switchTo(e.target.value)}>
           {TEST_USERS.map((user) => (
             <option key={user} value={user}>
@@ -56,7 +69,7 @@ function UserSwitcher() {
           ))}
         </select>
       </label>
-      <span className="muted">No real login: open another tab with a different user to test permissions.</span>
+      <span className="muted" title="No real login: open another tab with a different user to test permissions.">ⓘ</span>
     </p>
   );
 }
@@ -72,12 +85,7 @@ function BackendStatus() {
   if (result === "unreachable") text = "Backend unreachable";
   else if (result !== "loading") text = result.ok ? `Backend OK (${result.data.time})` : `Error ${result.status}`;
 
-  return (
-    <section>
-      <h2>1. Backend</h2>
-      <p data-testid="backend-status">{text}</p>
-    </section>
-  );
+  return <p data-testid="backend-status">{text}</p>;
 }
 
 /**
@@ -264,21 +272,11 @@ function CellExplorer() {
 
   return (
     <section>
-      <h2>2. Cell explorer</h2>
-      <p>Ids: lowercase letters, digits and dashes. Reload the page or restart the server — the data stays.</p>
       <div className="grid">
         <label>
           Workspace id
           <input value={workspaceId} onChange={(e) => setWorkspaceId(e.target.value)} />
         </label>
-        <label>
-          Display name
-          <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
-        </label>
-        <div className="buttons">
-          <button onClick={() => show(api.getWorkspace(workspaceId))}>Load workspace</button>
-          <button onClick={() => show(api.putWorkspace(workspaceId, { displayName }))}>Save workspace</button>
-        </div>
         <div className="wide">
           <strong>Documents in this workspace</strong> <span className="muted">(only those you may read)</span>
         </div>
@@ -306,7 +304,7 @@ function CellExplorer() {
           {opened && canEdit && <TitleStatus state={titleAutosave.state} />}
         </label>
         <div className="wide">
-          Body (Markdown)
+          <strong>Body (Markdown)</strong>
           {live && <PresenceBar session={live} />}
           {opened && doc ? (
             <CommentThreads
@@ -392,7 +390,22 @@ function CellExplorer() {
           onChanged={() => void refreshCatalogue()}
         />
       </div>
-      {output !== null && <pre data-testid="explorer-output">{JSON.stringify(output, null, 2)}</pre>}
+      <details className="panel developer" data-testid="developer-details">
+        <summary>Developer details</summary>
+        <BackendStatus />
+        <div className="grid">
+          <label>
+            Display name
+            <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
+          </label>
+          <div className="buttons">
+            <button onClick={() => show(api.getWorkspace(workspaceId))}>Load workspace</button>
+            <button onClick={() => show(api.putWorkspace(workspaceId, { displayName }))}>Save workspace</button>
+          </div>
+        </div>
+        <p className="muted">Ids: lowercase letters, digits and dashes. Each workspace and document is its own Durable Object with SQLite.</p>
+        {output !== null && <pre data-testid="explorer-output">{JSON.stringify(output, null, 2)}</pre>}
+      </details>
     </section>
   );
 }
