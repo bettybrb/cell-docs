@@ -28,7 +28,8 @@ const EditOutput = Schema.Struct({
   summary: Schema.String,
   edits: Schema.Array(
     Schema.Struct({
-      find: Schema.String.check(Schema.isMinLength(1)),
+      // May be "" only to insert into an empty document; applyEdits enforces that.
+      find: Schema.String,
       replace: Schema.String,
     }),
   ).check(Schema.isMaxLength(MAX_EDITS)),
@@ -36,7 +37,7 @@ const EditOutput = Schema.Struct({
 const SummaryOutput = Schema.Struct({ summary: Schema.String.check(Schema.isMinLength(1)) });
 
 const SYSTEM = {
-  edit: `You edit a Markdown document for a user. Reply with ONLY a JSON object: {"summary": string, "edits": [{"find": string, "replace": string}]}. Each "find" must be an exact, unique substring of the document (include enough context to be unique); "replace" is its replacement. Make the smallest edits that satisfy the instruction. Never include anything outside the JSON.`,
+  edit: `You edit a Markdown document for a user. Reply with ONLY a JSON object: {"summary": string, "edits": [{"find": string, "replace": string}]}. Each "find" must be an exact, unique substring of the document (include enough context to be unique); "replace" is its replacement. Make the smallest edits that satisfy the instruction. If the document is empty, reply with a single edit whose "find" is "" and whose "replace" is the new text. Never include anything outside the JSON.`,
   summarise: `You summarise a Markdown document. Reply with ONLY a JSON object: {"summary": string} where summary is 2-5 concise Markdown bullet points ("- ..."). Never include anything outside the JSON.`,
 } as const;
 
@@ -52,13 +53,34 @@ export function parseJsonObject(raw: string): unknown {
   }
 }
 
-function validate<S extends Schema.Decoder<unknown>>(schema: S, value: unknown): S["Type"] {
+function validate<S extends Schema.Decoder<unknown>>(schema: S, value: unknown, fields: string): S["Type"] {
   try {
     return Schema.decodeUnknownSync(schema)(value);
   } catch {
-    throw new LlmError("bad_model_output", "The model's answer did not match the expected shape.");
+    throw new LlmError("bad_model_output", `The model's answer did not match the expected shape (needs ${fields}).`);
   }
 }
+
+/** Gemini structured-output schemas (OpenAPI subset); the server-side validation above still decides. */
+const EDIT_JSON_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    summary: { type: "STRING" },
+    edits: { type: "ARRAY", items: { type: "OBJECT", properties: { find: { type: "STRING" }, replace: { type: "STRING" } }, required: ["find", "replace"] } },
+  },
+  required: ["summary", "edits"],
+};
+const SUMMARY_JSON_SCHEMA = { type: "OBJECT", properties: { summary: { type: "STRING" } }, required: ["summary"] };
+const CHART_JSON_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    title: { type: "STRING" },
+    type: { type: "STRING", enum: ["bar", "line"] },
+    labels: { type: "STRING" },
+    series: { type: "ARRAY", items: { type: "OBJECT", properties: { name: { type: "STRING" }, range: { type: "STRING" } }, required: ["name", "range"] } },
+  },
+  required: ["title", "type", "labels", "series"],
+};
 
 /**
  * Applies validated edits to the text. Every `find` must occur exactly once
@@ -66,6 +88,10 @@ function validate<S extends Schema.Decoder<unknown>>(schema: S, value: unknown):
  * rejected: a proposal must never rest on a guess.
  */
 export function applyEdits(text: string, edits: ReadonlyArray<{ find: string; replace: string }>): string {
+  if (edits.some((edit) => edit.find === "")) {
+    if (text !== "" || edits.length !== 1) throw new LlmError("bad_model_output", "The model proposed an edit with no text to find in a document that is not empty.");
+    return edits[0]!.replace;
+  }
   const spans = edits.map((edit) => {
     const first = text.indexOf(edit.find);
     if (first < 0) throw new LlmError("bad_model_output", `The model proposed text that is not in the document: “${edit.find.slice(0, 40)}”.`);
@@ -98,7 +124,7 @@ const CHART_SYSTEM = `You design one chart for a spreadsheet. The user gives cel
 export async function suggestChart(env: LlmEnv, instruction: string, cells: Record<string, string>, complete?: Complete) {
   const lines = Object.entries(cells).slice(0, 400).map(([ref, raw]) => `${ref}: ${raw}`).join("\n");
   const call = complete ?? pickProvider(env);
-  const out = validate(ChartOutput, parseJsonObject(await call(CHART_SYSTEM, `Request: ${instruction}\n\n<cells>\n${lines}\n</cells>`)));
+  const out = validate(ChartOutput, parseJsonObject(await call(CHART_SYSTEM, `Request: ${instruction}\n\n<cells>\n${lines}\n</cells>`, CHART_JSON_SCHEMA)), "title, type, labels, series");
   return { title: out.title.slice(0, 80), type: out.type, labels: out.labels, series: [...out.series] };
 }
 
@@ -108,25 +134,26 @@ export interface AiResult {
 }
 
 /** The model call: (system, user) -> raw reply text. Replaceable in tests. */
-export type Complete = (system: string, user: string) => Promise<string>;
+export type Complete = (system: string, user: string, schema?: object) => Promise<string>;
 
 /** Turns a validated model answer into proposed text. */
 export function interpret(mode: AiMode, text: string, raw: string): AiResult {
   const json = parseJsonObject(raw);
   if (mode === "summarise") {
-    const { summary } = validate(SummaryOutput, json);
+    const { summary } = validate(SummaryOutput, json, "summary");
     const section = `## Summary\n\n${summary.trim()}\n\n`;
     const proposed = text.startsWith("## Summary") ? text.replace(/^## Summary\n[\s\S]*?\n\n(?=\S)/, section) : section + text;
     return { proposed, summary: "AI summary" };
   }
-  const out = validate(EditOutput, json);
+  const out = validate(EditOutput, json, "summary, edits");
   return { proposed: applyEdits(text, out.edits), summary: out.summary };
 }
 
 export async function runAi(env: LlmEnv, mode: AiMode, instruction: string, text: string, complete?: Complete): Promise<AiResult> {
+  if (mode === "summarise" && !text.trim()) throw new LlmError("empty_document", "The document is empty, so there is nothing to summarise.", 422);
   const user = mode === "edit" ? `Instruction: ${instruction}\n\n<document>\n${text}\n</document>` : `<document>\n${text}\n</document>`;
   const call = complete ?? pickProvider(env);
-  return interpret(mode, text, await call(SYSTEM[mode], user));
+  return interpret(mode, text, await call(SYSTEM[mode], user, mode === "edit" ? EDIT_JSON_SCHEMA : SUMMARY_JSON_SCHEMA));
 }
 
 function pickProvider(env: LlmEnv): Complete {
@@ -142,7 +169,7 @@ function pickProvider(env: LlmEnv): Complete {
 }
 
 export function gemini(apiKey: string, model: string, fetchImpl: typeof fetch = fetch): Complete {
-  return async (system, user) => {
+  return async (system, user, schema) => {
     const data = (await post(
       `Gemini (${model})`,
       `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
@@ -151,7 +178,7 @@ export function gemini(apiKey: string, model: string, fetchImpl: typeof fetch = 
         systemInstruction: { parts: [{ text: system }] },
         contents: [{ role: "user", parts: [{ text: user }] }],
         // Room for the model's own "thinking" tokens as well as the JSON answer.
-        generationConfig: { responseMimeType: "application/json", maxOutputTokens: 8192 },
+        generationConfig: { responseMimeType: "application/json", ...(schema ? { responseSchema: schema } : {}), maxOutputTokens: 8192 },
       },
       apiKey,
       fetchImpl,
